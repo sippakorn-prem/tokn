@@ -6,13 +6,15 @@ export interface UsageWindow {
   resetsAtMs: number;
 }
 
+export type AuthStatus = "connected" | "missingToken" | "expiredToken" | "keychainDenied";
+
 export interface UsageSnapshot {
+  authStatus: AuthStatus;
   session: UsageWindow;
   weekly: UsageWindow;
   /** Burn-rate velocity samples for the sparkline, oldest first (~6h). */
   burnRate: number[];
   fetchedAtMs: number;
-  source: string;
 }
 
 export function fetchUsage(): Promise<UsageSnapshot> {

@@ -1,7 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap');
 
 /* ════════════════════════════════════════════════════════════════
-   TOKN — token & usage meter for your AI
+   TOKN — Claude Code usage meter
    Popover styles lifted from the Claude Design handoff (Tokn.html),
    built on the Cortex design system (paper/ink, dark variant first).
    ════════════════════════════════════════════════════════════════ */
@@ -21,10 +21,17 @@
   --cx-fg-4:      oklch(0.36 0.004 85);
   --cx-accent:    oklch(0.96 0.004 85);
   --cx-accent-bg: oklch(0.96 0.004 85 / 0.08);
+  --cx-accent-d:  oklch(1.00 0.004 85);
+  --cx-accent-on: oklch(0.14 0.004 85);
   --cx-add:       oklch(0.72 0.06 150);   /* sage  — live dot */
   --cx-warn:      oklch(0.80 0.10 75);    /* mustard — amber band */
   --cx-del:       oklch(0.70 0.12 28);    /* brick — red band */
   --cx-del-line:  oklch(0.70 0.12 28 / 0.40);
+  /* TOKN status mapping (gauge fill by band) — defined here so the
+     --cx-* refs resolve in scope (they don't exist on :root) */
+  --tk-ok:   var(--cx-fg);
+  --tk-warn: var(--cx-warn);
+  --tk-crit: var(--cx-del);
 }
 
 /* —— Cortex base tokens (light) ——————————————————————————— */
@@ -42,21 +49,22 @@
   --cx-fg-4:      oklch(0.70 0.004 85);
   --cx-accent:    oklch(0.18 0.004 85);
   --cx-accent-bg: oklch(0.18 0.004 85 / 0.06);
+  --cx-accent-d:  oklch(0.08 0.004 85);
+  --cx-accent-on: oklch(0.985 0.003 85);
   --cx-add:       oklch(0.46 0.06 150);
   --cx-warn:      oklch(0.58 0.10 75);
   --cx-del:       oklch(0.52 0.14 28);
   --cx-del-line:  oklch(0.52 0.14 28 / 0.34);
+  /* TOKN status mapping (gauge fill by band) */
+  --tk-ok:   var(--cx-fg);
+  --tk-warn: var(--cx-warn);
+  --tk-crit: var(--cx-del);
 }
 
 :root {
   --cx-sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --cx-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --cx-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
-
-  /* status mapping: OK <50% → ink · WARN 50–85% → mustard · CRIT >85% → brick */
-  --tk-ok:   var(--cx-fg);
-  --tk-warn: var(--cx-warn);
-  --tk-crit: var(--cx-del);
 }
 
 * { box-sizing: border-box; }
@@ -236,6 +244,75 @@ html, body { margin: 0; padding: 0; background: transparent; }
 .tk-refresh.spinning { pointer-events: none; color: var(--cx-fg-1); }
 .tk-refresh.spinning svg { animation: tk-spin 0.7s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
 @keyframes tk-spin { to { transform: rotate(360deg); } }
+
+/* —— connect gate (first run / disconnected) —— */
+.tk-body { position: relative; flex: 1; display: flex; flex-direction: column; }
+.tk-body.gated > .tk-gauges,
+.tk-body.gated > .tk-spark,
+.tk-body.gated > .tk-foot {
+  filter: blur(5px);
+  opacity: 0.5;
+  pointer-events: none;
+  user-select: none;
+}
+.tk-gate {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+  padding: 22px 26px;
+  text-align: center;
+  background: color-mix(in oklch, var(--cx-bg) 44%, transparent);
+}
+.tk-gate .lockchip {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--cx-bg-2);
+  border: 1px solid var(--cx-border-2);
+  color: var(--cx-fg-1);
+  margin-bottom: 1px;
+}
+.tk-gate .lockchip svg { width: 19px; height: 19px; }
+.tk-gate .gtitle { font-family: var(--cx-sans); font-weight: 600; font-size: 15.5px; color: var(--cx-fg); letter-spacing: -0.01em; }
+.tk-gate .gsub { font-family: var(--cx-mono); font-size: 10.5px; color: var(--cx-fg-2); letter-spacing: 0.01em; line-height: 1.55; max-width: 218px; }
+.tk-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+  padding: 10px 17px;
+  background: var(--cx-accent);
+  color: var(--cx-accent-on);
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: var(--cx-mono);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.30);
+  transition: background 0.14s var(--cx-ease), transform 0.14s var(--cx-ease), box-shadow 0.14s var(--cx-ease);
+}
+.tk-cta:hover { background: var(--cx-accent-d); box-shadow: 0 10px 26px rgba(0, 0, 0, 0.36); transform: translateY(-1px); }
+.tk-cta:active { transform: translateY(1px); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.30); }
+.tk-cta svg { width: 14px; height: 14px; }
+.tk-gate .gnote {
+  font-family: var(--cx-mono);
+  font-size: 8.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--cx-fg-4);
+  margin-top: 4px;
+}
 
 .tk-error {
   font-family: var(--cx-mono);

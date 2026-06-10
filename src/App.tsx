@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Gate } from "./Gate";
 import { Gauge } from "./Gauge";
 import { Mark } from "./Mark";
 import { Spark } from "./Spark";
@@ -50,8 +51,8 @@ function App() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const spinUntil = useRef(0);
 
-  const refresh = useCallback(() => {
-    fetchUsage()
+  const loadUsage = useCallback(() => {
+    return fetchUsage()
       .then((s) => {
         setSnapshot(s);
         setError(null);
@@ -59,19 +60,17 @@ function App() {
       .catch((e) => setError(String(e)));
   }, []);
 
+  const refresh = useCallback(() => {
+    void loadUsage();
+  }, [loadUsage]);
+
   const onRefreshClick = useCallback(() => {
     setSpinning(true);
     spinUntil.current = Date.now() + MIN_SPIN_MS;
-    fetchUsage()
-      .then((s) => {
-        setSnapshot(s);
-        setError(null);
-      })
-      .catch((e) => setError(String(e)))
-      .finally(() => {
-        setTimeout(() => setSpinning(false), Math.max(0, spinUntil.current - Date.now()));
-      });
-  }, []);
+    loadUsage().finally(() => {
+      setTimeout(() => setSpinning(false), Math.max(0, spinUntil.current - Date.now()));
+    });
+  }, [loadUsage]);
 
   useEffect(() => {
     refresh();
@@ -83,6 +82,10 @@ function App() {
     };
   }, [refresh]);
 
+  const lockedAuthStatus =
+    snapshot?.authStatus === "connected" ? null : snapshot?.authStatus ?? null;
+  const connected = !lockedAuthStatus;
+
   return (
     <main className="tk" data-theme={theme}>
       <header className="tk-head">
@@ -93,8 +96,9 @@ function App() {
       {error && <div className="tk-error">{error}</div>}
 
       {snapshot && (
-        <>
-          <div className="tk-gauges">
+        <div className={connected ? "tk-body" : "tk-body gated"}>
+          {/* key replays the count-up when the gate unlocks */}
+          <div className="tk-gauges" key={connected ? "live" : "locked"}>
             <Gauge
               label={snapshot.session.label}
               usedPct={snapshot.session.usedPct}
@@ -124,7 +128,9 @@ function App() {
               <RefreshIcon />
             </button>
           </footer>
-        </>
+
+          {lockedAuthStatus && <Gate authStatus={lockedAuthStatus} onRetry={refresh} />}
+        </div>
       )}
     </main>
   );
