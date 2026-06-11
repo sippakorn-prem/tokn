@@ -15,6 +15,13 @@ export interface UsageSnapshot {
   /** Burn-rate velocity samples for the sparkline, oldest first (~6h). */
   burnRate: number[];
   fetchedAtMs: number;
+  /**
+   * Set while the usage endpoint is rate limiting us (429): when the next
+   * fetch is allowed. The rest of the snapshot is the last good data.
+   */
+  rateLimitedUntilMs?: number | null;
+  /** True when no real data has ever been fetched — windows are filler. */
+  placeholder?: boolean;
 }
 
 export function fetchUsage(): Promise<UsageSnapshot> {

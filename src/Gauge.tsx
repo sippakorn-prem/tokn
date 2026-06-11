@@ -50,9 +50,11 @@ interface GaugeProps {
   usedPct: number;
   resetsAtMs: number;
   nowMs: number;
+  /** No real data behind these numbers yet — render dashes, not zeros. */
+  placeholder?: boolean;
 }
 
-export function Gauge({ label, usedPct, resetsAtMs, nowMs }: GaugeProps) {
+export function Gauge({ label, usedPct, resetsAtMs, nowMs, placeholder }: GaugeProps) {
   const pct = Math.min(100, Math.max(0, usedPct));
   const shown = useCountUp(pct);
   const lit = Math.round((shown / 100) * TICKS);
@@ -62,19 +64,31 @@ export function Gauge({ label, usedPct, resetsAtMs, nowMs }: GaugeProps) {
       <div className="tk-ring">
         <svg viewBox="0 0 124 124">
           {TICK_GEOMETRY.map((t, i) => (
-            <line key={i} {...t} className={i < lit ? "tk-tick on" : "tk-tick"} />
+            <line key={i} {...t} className={!placeholder && i < lit ? "tk-tick on" : "tk-tick"} />
           ))}
         </svg>
         <div className="ctr">
           <div className="tk-pct">
-            <span>{Math.round(shown)}</span>
-            <span className="u">%</span>
+            {placeholder ? (
+              <span className="dash">–</span>
+            ) : (
+              <>
+                <span>{Math.round(shown)}</span>
+                <span className="u">%</span>
+              </>
+            )}
           </div>
         </div>
       </div>
       <div className="lbl">{label}</div>
       <div className="reset">
-        resets in <b>{fmtCountdown(resetsAtMs - nowMs)}</b>
+        {placeholder ? (
+          <>waiting for data</>
+        ) : (
+          <>
+            resets in <b>{fmtCountdown(resetsAtMs - nowMs)}</b>
+          </>
+        )}
       </div>
     </div>
   );

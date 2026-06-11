@@ -3,11 +3,19 @@ import { Gate } from "./Gate";
 import { Gauge } from "./Gauge";
 import { Mark } from "./Mark";
 import { Spark } from "./Spark";
-import { fetchUsage, fmtAgo, UsageSnapshot } from "./usage";
+import { fetchUsage, fmtAgo, fmtCountdown, UsageSnapshot } from "./usage";
 import "./App.css";
 
 const REFRESH_INTERVAL_MS = 60_000;
 const MIN_SPIN_MS = 720;
+/** Manual-refresh cooldown; matches the backend's minimum fetch spacing. */
+const REFRESH_COOLDOWN_MS = 30_000;
+
+/** Compact countdown that fits inside the 30px refresh button. */
+function fmtShort(ms: number): string {
+  const s = Math.ceil(Math.max(0, ms) / 1000);
+  return s < 60 ? `${s}s` : `${Math.ceil(s / 60)}m`;
+}
 
 function useTheme(): "dark" | "light" {
   const [theme, setTheme] = useState<"dark" | "light">(() =>
@@ -49,6 +57,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [spinning, setSpinning] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [cooldownUntil, setCooldownUntil] = useState(0);
   const spinUntil = useRef(0);
 
   const loadUsage = useCallback(() => {
@@ -64,13 +73,29 @@ function App() {
     void loadUsage();
   }, [loadUsage]);
 
-  const onRefreshClick = useCallback(() => {
+  const rateLimitedUntil = snapshot?.rateLimitedUntilMs ?? 0;
+  const rateLimited = rateLimitedUntil > nowMs;
+  const placeholder = snapshot?.placeholder ?? false;
+  const refreshBlockedUntil = Math.max(cooldownUntil, rateLimitedUntil);
+  const refreshBlocked = refreshBlockedUntil > nowMs;
+
+  // Refetch as soon as the rate-limit window passes instead of waiting for
+  // the next 60s tick — otherwise stale/placeholder data lingers banner-less.
+  const wasRateLimited = useRef(false);
+  useEffect(() => {
+    if (wasRateLimited.current && !rateLimited) refresh();
+    wasRateLimited.current = rateLimited;
+  }, [rateLimited, refresh]);
+
+  const onRefreshClick = () => {
+    if (refreshBlocked || spinning) return;
     setSpinning(true);
     spinUntil.current = Date.now() + MIN_SPIN_MS;
+    setCooldownUntil(Date.now() + REFRESH_COOLDOWN_MS);
     loadUsage().finally(() => {
       setTimeout(() => setSpinning(false), Math.max(0, spinUntil.current - Date.now()));
     });
-  }, [loadUsage]);
+  };
 
   useEffect(() => {
     refresh();
@@ -91,9 +116,16 @@ function App() {
       <header className="tk-head">
         <Mark />
         <span className="tk-word">Tokn</span>
+        <span className="tk-tagline">claude code usage</span>
       </header>
 
       {error && <div className="tk-error">{error}</div>}
+      {rateLimited && (
+        <div className="tk-ratelimit">
+          {placeholder ? "rate limited · first data in " : "rate limited · retrying in "}
+          {fmtCountdown(rateLimitedUntil - nowMs)}
+        </div>
+      )}
 
       {snapshot && (
         <div className={connected ? "tk-body" : "tk-body gated"}>
@@ -104,12 +136,14 @@ function App() {
               usedPct={snapshot.session.usedPct}
               resetsAtMs={snapshot.session.resetsAtMs}
               nowMs={nowMs}
+              placeholder={placeholder}
             />
             <Gauge
               label={snapshot.weekly.label}
               usedPct={snapshot.weekly.usedPct}
               resetsAtMs={snapshot.weekly.resetsAtMs}
               nowMs={nowMs}
+              placeholder={placeholder}
             />
           </div>
 
@@ -122,10 +156,19 @@ function App() {
             </div>
             <button
               className={spinning ? "tk-refresh spinning" : "tk-refresh"}
-              title="Refresh"
+              title={
+                refreshBlocked
+                  ? `Refresh available in ${fmtCountdown(refreshBlockedUntil - nowMs)}`
+                  : "Refresh"
+              }
               onClick={onRefreshClick}
+              disabled={refreshBlocked}
             >
-              <RefreshIcon />
+              {refreshBlocked && !spinning ? (
+                <span className="count">{fmtShort(refreshBlockedUntil - nowMs)}</span>
+              ) : (
+                <RefreshIcon />
+              )}
             </button>
           </footer>
 

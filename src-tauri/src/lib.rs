@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{
     image::Image,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    LogicalPosition, LogicalSize, Manager, PhysicalPosition,
 };
 use tauri_plugin_positioner::{Position, WindowExt};
 
@@ -15,6 +16,13 @@ const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const EXPIRY_MARGIN_MS: u64 = 60_000;
 /// ~6h of samples at the 60s refresh interval.
 const HISTORY_CAP: usize = 360;
+/// Drop persisted samples older than the sparkline window on load.
+const HISTORY_WINDOW_MS: u64 = 6 * 60 * 60 * 1000;
+/// Minimum spacing between network fetches; calls inside it return the cache.
+const MIN_FETCH_SPACING_MS: u64 = 30_000;
+/// 429 backoff when the server sends no Retry-After: 2m → 4m → … capped 15m.
+const BACKOFF_BASE_SECS: u64 = 120;
+const BACKOFF_CAP_SECS: u64 = 900;
 
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +49,12 @@ struct UsageSnapshot {
     weekly: UsageWindow,
     burn_rate: Vec<f64>,
     fetched_at_ms: u64,
+    /// Set while the usage endpoint is rate limiting us (429): the time the
+    /// next fetch is allowed. The rest of the snapshot is the last good data.
+    rate_limited_until_ms: Option<u64>,
+    /// True when we have never fetched real data (e.g. rate limited on the
+    /// very first call) — the windows are filler, not "0% used".
+    placeholder: bool,
 }
 
 /// (timestamp ms, five-hour utilization %) samples for the burn-rate sparkline.
@@ -131,6 +145,8 @@ struct ApiUsage {
 
 enum UsageFetchError {
     Unauthorized,
+    /// 429 with the server's Retry-After (seconds), when present.
+    RateLimited(Option<u64>),
     Other(String),
 }
 
@@ -155,6 +171,14 @@ async fn fetch_usage(token: &str) -> Result<ApiUsage, UsageFetchError> {
     let status = resp.status();
     if status.as_u16() == 401 || status.as_u16() == 403 {
         return Err(UsageFetchError::Unauthorized);
+    }
+    if status.as_u16() == 429 {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        return Err(UsageFetchError::RateLimited(retry_after));
     }
     if !status.is_success() {
         return Err(UsageFetchError::Other(format!(
@@ -185,6 +209,47 @@ fn to_window(label: &str, api: Option<ApiWindow>) -> UsageWindow {
 
 /* ── burn rate ────────────────────────────────────────────────── */
 
+/// Burn-rate history survives restarts so the sparkline doesn't reset to
+/// "collecting data" on every launch.
+fn history_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("history.json"))
+}
+
+fn load_history(app: &tauri::AppHandle) -> VecDeque<(u64, f64)> {
+    let Some(path) = history_path(app) else {
+        return VecDeque::new();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return VecDeque::new();
+    };
+    let Ok(mut samples) = serde_json::from_slice::<VecDeque<(u64, f64)>>(&bytes) else {
+        return VecDeque::new();
+    };
+    let cutoff = now_ms().saturating_sub(HISTORY_WINDOW_MS);
+    samples.retain(|&(ts, _)| ts <= now_ms() && ts >= cutoff);
+    while samples.len() > HISTORY_CAP {
+        samples.pop_front();
+    }
+    samples
+}
+
+fn save_history(app: &tauri::AppHandle, history: &UsageHistory) {
+    let Some(path) = history_path(app) else {
+        return;
+    };
+    let json = {
+        let h = history.0.lock().expect("history lock poisoned");
+        match serde_json::to_vec(&*h) {
+            Ok(json) => json,
+            Err(_) => return,
+        }
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, json);
+}
+
 /// Record a session-utilization sample and return per-interval positive
 /// deltas — the burn-rate velocity series for the sparkline. Negative deltas
 /// (window reset) clamp to zero.
@@ -207,6 +272,11 @@ fn record_burn_sample(history: &UsageHistory, pct: f64, now: u64) -> Vec<f64> {
 
 /* ── snapshot assembly ────────────────────────────────────────── */
 
+enum SnapshotError {
+    RateLimited(Option<u64>),
+    Other(String),
+}
+
 fn disconnected_snapshot(auth_status: AuthStatus) -> UsageSnapshot {
     let now = now_ms();
     UsageSnapshot {
@@ -215,11 +285,13 @@ fn disconnected_snapshot(auth_status: AuthStatus) -> UsageSnapshot {
         weekly: to_window("weekly limit", None),
         burn_rate: Vec::new(),
         fetched_at_ms: now,
+        rate_limited_until_ms: None,
+        placeholder: false,
     }
 }
 
-async fn build_snapshot(history: &UsageHistory) -> Result<UsageSnapshot, String> {
-    let token = match read_access_token()? {
+async fn build_snapshot(history: &UsageHistory) -> Result<UsageSnapshot, SnapshotError> {
+    let token = match read_access_token().map_err(SnapshotError::Other)? {
         TokenRead::Ready(token) => token,
         TokenRead::Missing => return Ok(disconnected_snapshot(AuthStatus::MissingToken)),
         TokenRead::Expired => return Ok(disconnected_snapshot(AuthStatus::ExpiredToken)),
@@ -232,7 +304,10 @@ async fn build_snapshot(history: &UsageHistory) -> Result<UsageSnapshot, String>
         Err(UsageFetchError::Unauthorized) => {
             return Ok(disconnected_snapshot(AuthStatus::ExpiredToken));
         }
-        Err(UsageFetchError::Other(error)) => return Err(error),
+        Err(UsageFetchError::RateLimited(retry_after)) => {
+            return Err(SnapshotError::RateLimited(retry_after));
+        }
+        Err(UsageFetchError::Other(error)) => return Err(SnapshotError::Other(error)),
     };
     let now = now_ms();
     let session = to_window("current session", usage.five_hour);
@@ -244,7 +319,40 @@ async fn build_snapshot(history: &UsageHistory) -> Result<UsageSnapshot, String>
         weekly,
         burn_rate,
         fetched_at_ms: now,
+        rate_limited_until_ms: None,
+        placeholder: false,
     })
+}
+
+/* ── fetch gate ───────────────────────────────────────────────── */
+
+/// Serializes access to the usage endpoint: caches the last good snapshot,
+/// enforces minimum spacing between network fetches, and tracks 429 backoff.
+struct FetchGate(Mutex<GateState>);
+
+#[derive(Default)]
+struct GateState {
+    last_snapshot: Option<UsageSnapshot>,
+    /// No network fetch before this time; calls inside it serve the cache.
+    next_fetch_at_ms: u64,
+    /// Current 429 backoff (seconds); doubles per consecutive 429.
+    backoff_secs: u64,
+    /// Whether `next_fetch_at_ms` came from a 429 (vs. normal spacing).
+    rate_limited: bool,
+}
+
+impl GateState {
+    fn cached_response(&self) -> UsageSnapshot {
+        let mut snap = self.last_snapshot.clone().unwrap_or_else(|| {
+            // Never had real data (rate limited from the first call): the
+            // zeros are filler, and the frontend must not show them as usage.
+            let mut s = disconnected_snapshot(AuthStatus::Connected);
+            s.placeholder = true;
+            s
+        });
+        snap.rate_limited_until_ms = self.rate_limited.then_some(self.next_fetch_at_ms);
+        snap
+    }
 }
 
 fn sync_tray(app: &tauri::AppHandle, snapshot: &UsageSnapshot) {
@@ -263,10 +371,51 @@ fn sync_tray(app: &tauri::AppHandle, snapshot: &UsageSnapshot) {
 async fn usage_snapshot(
     app: tauri::AppHandle,
     history: tauri::State<'_, UsageHistory>,
+    gate: tauri::State<'_, FetchGate>,
 ) -> Result<UsageSnapshot, String> {
-    let snapshot = build_snapshot(&history).await?;
-    sync_tray(&app, &snapshot);
-    Ok(snapshot)
+    let now = now_ms();
+    {
+        let g = gate.0.lock().expect("gate lock poisoned");
+        if now < g.next_fetch_at_ms && (g.last_snapshot.is_some() || g.rate_limited) {
+            return Ok(g.cached_response());
+        }
+    }
+
+    match build_snapshot(&history).await {
+        Ok(snapshot) => {
+            {
+                let mut g = gate.0.lock().expect("gate lock poisoned");
+                g.rate_limited = false;
+                g.backoff_secs = 0;
+                // Auth-gated states skip the spacing so the gate's retry
+                // button reacts immediately once the user fixes login.
+                g.next_fetch_at_ms = if matches!(snapshot.auth_status, AuthStatus::Connected) {
+                    now + MIN_FETCH_SPACING_MS
+                } else {
+                    0
+                };
+                g.last_snapshot = Some(snapshot.clone());
+            }
+            sync_tray(&app, &snapshot);
+            if matches!(snapshot.auth_status, AuthStatus::Connected) {
+                save_history(&app, &history);
+            }
+            Ok(snapshot)
+        }
+        Err(SnapshotError::RateLimited(retry_after)) => {
+            let mut g = gate.0.lock().expect("gate lock poisoned");
+            let wait_secs = retry_after.unwrap_or(if g.backoff_secs == 0 {
+                BACKOFF_BASE_SECS
+            } else {
+                (g.backoff_secs * 2).min(BACKOFF_CAP_SECS)
+            });
+            g.backoff_secs = wait_secs;
+            g.rate_limited = true;
+            g.next_fetch_at_ms = now + wait_secs * 1000;
+            Ok(g.cached_response())
+        }
+        Err(SnapshotError::Other(error)) => Err(error),
+    }
 }
 
 /* ── tray icon ────────────────────────────────────────────────── */
@@ -313,17 +462,127 @@ fn tray_ring_image(pct: f64) -> Image<'static> {
 
 /* ── window / app shell ───────────────────────────────────────── */
 
-fn toggle_popover(app: &tauri::AppHandle) {
+/// When and where the popover was last hidden by losing focus. A click on the
+/// tray icon steals focus (hiding the popover) before the click event arrives,
+/// so the click handler needs this to tell "toggle closed" from "open again".
+struct PopoverHiddenAt(Mutex<Option<(Instant, PhysicalPosition<i32>)>>);
+
+/// The same tray icon anchors the window to the same spot; allow a couple of
+/// pixels of slack for rounding across monitors with different scale factors.
+fn same_anchor(a: Option<PhysicalPosition<i32>>, b: Option<PhysicalPosition<i32>>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => (a.x - b.x).abs() <= 2 && (a.y - b.y).abs() <= 2,
+        _ => false,
+    }
+}
+
+fn to_logical_pos(p: &tauri::Position, scale: f64) -> LogicalPosition<f64> {
+    match *p {
+        tauri::Position::Physical(p) => LogicalPosition::new(p.x as f64 / scale, p.y as f64 / scale),
+        tauri::Position::Logical(p) => p,
+    }
+}
+
+fn to_logical_size(s: &tauri::Size, scale: f64) -> LogicalSize<f64> {
+    match *s {
+        tauri::Size::Physical(s) => {
+            LogicalSize::new(s.width as f64 / scale, s.height as f64 / scale)
+        }
+        tauri::Size::Logical(s) => s,
+    }
+}
+
+/// Compute where the popover should open for a click on `tray_rect`, in
+/// logical (points) coordinates: bottom-center of the clicked tray icon,
+/// clamped to that monitor's edges.
+///
+/// The tray event reports the rect in physical pixels scaled by the clicked
+/// screen's factor, so on mixed-DPI setups the same physical coordinates mean
+/// different places on different monitors. Undo the scaling per candidate
+/// monitor and accept the monitor whose logical bounds contain the icon.
+fn popover_target(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    tray_rect: &tauri::Rect,
+) -> Option<LogicalPosition<f64>> {
+    const EDGE_MARGIN: f64 = 8.0;
+    let win_w = to_logical_size(
+        &tauri::Size::Physical(window.outer_size().ok()?),
+        window.scale_factor().ok()?,
+    )
+    .width;
+
+    for monitor in app.available_monitors().ok()? {
+        let scale = monitor.scale_factor();
+        let m_pos = monitor.position().to_logical::<f64>(scale);
+        let m_size = monitor.size().to_logical::<f64>(scale);
+        let tray_pos = to_logical_pos(&tray_rect.position, scale);
+        let tray_size = to_logical_size(&tray_rect.size, scale);
+
+        let cx = tray_pos.x + tray_size.width / 2.0;
+        let cy = tray_pos.y + tray_size.height / 2.0;
+        let inside = cx >= m_pos.x
+            && cx <= m_pos.x + m_size.width
+            && cy >= m_pos.y
+            && cy <= m_pos.y + m_size.height;
+        if !inside {
+            continue;
+        }
+
+        let max_x = m_pos.x + m_size.width - win_w - EDGE_MARGIN;
+        let x = (cx - win_w / 2.0).clamp(m_pos.x + EDGE_MARGIN, max_x.max(m_pos.x + EDGE_MARGIN));
+        let y = tray_pos.y + tray_size.height;
+        return Some(LogicalPosition::new(x, y));
+    }
+    None
+}
+
+fn toggle_popover(app: &tauri::AppHandle, tray_rect: &tauri::Rect) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if window.is_visible().unwrap_or(false) {
-        let _ = window.hide();
-    } else {
-        let _ = window.move_window(Position::TrayBottomCenter);
-        let _ = window.show();
-        let _ = window.set_focus();
+    let was_visible = window.is_visible().unwrap_or(false);
+    let anchor_before = window.outer_position().ok();
+    // Anchor to the tray icon that was clicked — each display has its own
+    // menu bar. The positioner plugin is only the fallback: it mixes physical
+    // coordinates across monitors, which misplaces the popover on mixed-DPI
+    // setups.
+    match popover_target(app, &window, tray_rect) {
+        Some(target) => {
+            let _ = window.set_position(tauri::Position::Logical(target));
+        }
+        None => {
+            let _ = window.move_window(Position::TrayBottomCenter);
+        }
     }
+    let anchor = window.outer_position().ok();
+
+    if was_visible {
+        if same_anchor(anchor, anchor_before) {
+            let _ = window.hide();
+        } else {
+            // Clicked the tray on another display: already moved there, keep open.
+            let _ = window.set_focus();
+        }
+        return;
+    }
+
+    let hidden = app.state::<PopoverHiddenAt>();
+    let closed_by_this_click = hidden
+        .0
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .is_some_and(|(at, pos)| {
+            at.elapsed() < Duration::from_millis(400) && same_anchor(Some(pos), anchor)
+        });
+    if closed_by_this_click {
+        // The focus loss from this same click already hid it at this tray:
+        // the click means "close", so don't reopen.
+        return;
+    }
+    let _ = window.show();
+    let _ = window.set_focus();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -331,12 +590,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_positioner::init())
-        .manage(UsageHistory(Mutex::new(VecDeque::new())))
+        .manage(FetchGate(Mutex::new(GateState::default())))
+        .manage(PopoverHiddenAt(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![usage_snapshot])
         .setup(|app| {
             // Menu bar app: no Dock icon, no app switcher entry.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            app.manage(UsageHistory(Mutex::new(load_history(app.handle()))));
 
             // Empty ring until the first successful fetch.
             TrayIconBuilder::with_id(TRAY_ID)
@@ -348,10 +610,11 @@ pub fn run() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
+                        rect,
                         ..
                     } = event
                     {
-                        toggle_popover(tray.app_handle());
+                        toggle_popover(tray.app_handle(), &rect);
                     }
                 })
                 .build(app)?;
@@ -359,9 +622,20 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Popover behavior: clicking anywhere else dismisses it.
+            // Popover behavior: clicking anywhere else dismisses it. Record
+            // where it was anchored so a tray click that caused this focus
+            // loss can tell "toggle closed" from "reopen on another display".
             if let tauri::WindowEvent::Focused(false) = event {
-                let _ = window.hide();
+                if window.is_visible().unwrap_or(false) {
+                    let hidden = window.app_handle().state::<PopoverHiddenAt>();
+                    if let Ok(mut g) = hidden.0.lock() {
+                        *g = window
+                            .outer_position()
+                            .ok()
+                            .map(|pos| (Instant::now(), pos));
+                    }
+                    let _ = window.hide();
+                }
             }
         })
         .run(tauri::generate_context!())

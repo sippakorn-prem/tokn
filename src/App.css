@@ -108,6 +108,15 @@ html, body { margin: 0; padding: 0; background: transparent; }
   letter-spacing: 0.005em;
   color: var(--cx-fg);
 }
+/* what Tokn tracks — text only, no Claude mark (nominative fair use) */
+.tk-tagline {
+  margin-left: auto;
+  font-family: var(--cx-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cx-fg-3);
+}
 @keyframes tk-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 /* gauges */
@@ -151,6 +160,7 @@ html, body { margin: 0; padding: 0; background: transparent; }
   align-items: flex-start;
 }
 .tk-pct .u { font-size: 14px; font-weight: 400; margin-top: 3px; margin-left: 1px; color: var(--cx-fg-3); letter-spacing: 0; }
+.tk-pct .dash { color: var(--cx-fg-4); }
 .tk-gauge[data-status="warn"] .tk-pct { color: var(--cx-warn); }
 .tk-gauge[data-status="crit"] .tk-pct { color: var(--cx-del); }
 .tk-gauge .lbl {
@@ -197,6 +207,7 @@ html, body { margin: 0; padding: 0; background: transparent; }
   white-space: nowrap;
 }
 .tk-spark .v b { color: var(--cx-fg); font-weight: 500; }
+.tk-spark .v .muted { color: var(--cx-fg-4); }
 .tk-spark .chart { height: 38px; position: relative; }
 .tk-spark svg { display: block; width: 100%; height: 100%; overflow: visible; }
 .tk-spark .line { fill: none; stroke: var(--cx-fg-1); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -321,4 +332,32 @@ html, body { margin: 0; padding: 0; background: transparent; }
   padding: 10px 16px;
   border-bottom: 1px solid var(--cx-border);
   word-break: break-word;
+}
+
+/* 429 from the usage endpoint: stale-but-real data, calm amber note */
+.tk-ratelimit {
+  font-family: var(--cx-mono);
+  font-size: 10.5px;
+  color: var(--cx-warn);
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--cx-border);
+  font-variant-numeric: tabular-nums;
+}
+
+/* cooldown countdown shown inside the refresh button */
+.tk-refresh .count {
+  font-family: var(--cx-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--cx-fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.tk-refresh:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.tk-refresh:disabled:hover {
+  border-color: var(--cx-border-2);
+  color: var(--cx-fg-2);
+  background: var(--cx-bg-1);
 }

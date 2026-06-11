@@ -3,6 +3,8 @@ import { useEffect, useMemo, useRef } from "react";
 const W = 288;
 const H = 38;
 const PAD = 2;
+/** Below this many samples (~5 min of polls) the ×-avg figure is noise. */
+const MIN_SAMPLES = 5;
 
 interface SparkProps {
   samples: number[];
@@ -13,6 +15,7 @@ export function Spark({ samples }: SparkProps) {
   const lineRef = useRef<SVGPathElement>(null);
   const areaRef = useRef<SVGPathElement>(null);
   const dotRef = useRef<SVGCircleElement>(null);
+  const collecting = samples.length < MIN_SAMPLES;
 
   const { linePath, areaPath, dotX, dotY, value } = useMemo(() => {
     const pts = samples.length >= 2 ? samples : [0.5, 0.5];
@@ -38,7 +41,7 @@ export function Spark({ samples }: SparkProps) {
     const line = lineRef.current;
     const area = areaRef.current;
     const dot = dotRef.current;
-    if (!line || !area || !dot) return;
+    if (!line || !area || !dot) return; // collecting: nothing to animate
     const len = line.getTotalLength();
     line.style.transition = "none";
     line.style.strokeDasharray = `${len}`;
@@ -71,15 +74,25 @@ export function Spark({ samples }: SparkProps) {
           <span className="em">—</span> burn rate
         </span>
         <span className="v">
-          <b>{value}×</b> avg · 6h
+          {collecting ? (
+            <span className="muted">collecting data…</span>
+          ) : (
+            <>
+              <b>{value}×</b> vs 6h avg
+            </>
+          )}
         </span>
       </div>
       <div className="chart">
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
           <line className="base" x1={PAD} y1={H - 2} x2={W - PAD} y2={H - 2} />
-          <path ref={areaRef} className="area" d={areaPath} />
-          <path ref={lineRef} className="line" d={linePath} />
-          <circle ref={dotRef} className="dot" cx={dotX} cy={dotY} r={2.2} />
+          {!collecting && (
+            <>
+              <path ref={areaRef} className="area" d={areaPath} />
+              <path ref={lineRef} className="line" d={linePath} />
+              <circle ref={dotRef} className="dot" cx={dotX} cy={dotY} r={2.2} />
+            </>
+          )}
         </svg>
       </div>
     </div>
