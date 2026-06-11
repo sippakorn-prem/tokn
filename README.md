@@ -28,6 +28,10 @@ That means:
 
 Claude Code stores its login credential in macOS Keychain. Tokn reads that local Keychain item and uses it to request usage data from Anthropic.
 
+This behavior is documented by Anthropic in [Claude Code docs: Authentication — Credential management](https://code.claude.com/docs/en/authentication#credential-management):
+
+> On macOS, credentials are stored in the encrypted macOS Keychain.
+
 The flow is:
 
 1. You sign in to Claude Code in your terminal.
