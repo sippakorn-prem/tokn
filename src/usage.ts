@@ -56,3 +56,24 @@ export function fmtAgo(ms: number): string {
   if (m < 60) return `${m}m ago`;
   return `${Math.floor(m / 60)}h ago`;
 }
+
+/**
+ * Absolute reset moment, smart-relative to now: time-only when it lands
+ * today (e.g. "5:00 PM"), weekday + time within the week ("Wed 5:00 PM"),
+ * and month/day + time beyond that ("Jul 14, 5:00 PM"). Pairs with the
+ * countdown so users see both "how long" and "when".
+ */
+export function fmtResetAt(atMs: number, nowMs: number): string {
+  const at = new Date(atMs);
+  const now = new Date(nowMs);
+  const time = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const sameDay =
+    at.getFullYear() === now.getFullYear() &&
+    at.getMonth() === now.getMonth() &&
+    at.getDate() === now.getDate();
+  if (sameDay) return time;
+  if (atMs - nowMs < 6 * 86400_000) {
+    return `${at.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  }
+  return `${at.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+}

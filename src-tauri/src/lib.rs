@@ -339,6 +339,11 @@ struct GateState {
     backoff_secs: u64,
     /// Whether `next_fetch_at_ms` came from a 429 (vs. normal spacing).
     rate_limited: bool,
+    /// A network fetch is in flight. Concurrent callers serve the cache
+    /// instead of firing a second request (the spacing window isn't written
+    /// until the fetch returns, so without this two overlapping calls would
+    /// both hit the endpoint).
+    in_flight: bool,
 }
 
 impl GateState {
@@ -375,27 +380,34 @@ async fn usage_snapshot(
 ) -> Result<UsageSnapshot, String> {
     let now = now_ms();
     {
-        let g = gate.0.lock().expect("gate lock poisoned");
-        if now < g.next_fetch_at_ms && (g.last_snapshot.is_some() || g.rate_limited) {
+        let mut g = gate.0.lock().expect("gate lock poisoned");
+        // Serve the cache when the spacing window is still open, or when
+        // another call is already fetching — otherwise overlapping callers
+        // (StrictMode double-mount, the 60s tick landing on a manual refresh,
+        // the rate-limit-cleared refetch) would each hit the endpoint.
+        let within_spacing = now < g.next_fetch_at_ms && (g.last_snapshot.is_some() || g.rate_limited);
+        if within_spacing || g.in_flight {
             return Ok(g.cached_response());
         }
+        g.in_flight = true;
     }
 
-    match build_snapshot(&history).await {
+    let result = build_snapshot(&history).await;
+    let mut g = gate.0.lock().expect("gate lock poisoned");
+    g.in_flight = false;
+    match result {
         Ok(snapshot) => {
-            {
-                let mut g = gate.0.lock().expect("gate lock poisoned");
-                g.rate_limited = false;
-                g.backoff_secs = 0;
-                // Auth-gated states skip the spacing so the gate's retry
-                // button reacts immediately once the user fixes login.
-                g.next_fetch_at_ms = if matches!(snapshot.auth_status, AuthStatus::Connected) {
-                    now + MIN_FETCH_SPACING_MS
-                } else {
-                    0
-                };
-                g.last_snapshot = Some(snapshot.clone());
-            }
+            g.rate_limited = false;
+            g.backoff_secs = 0;
+            // Auth-gated states skip the spacing so the gate's retry
+            // button reacts immediately once the user fixes login.
+            g.next_fetch_at_ms = if matches!(snapshot.auth_status, AuthStatus::Connected) {
+                now + MIN_FETCH_SPACING_MS
+            } else {
+                0
+            };
+            g.last_snapshot = Some(snapshot.clone());
+            drop(g);
             sync_tray(&app, &snapshot);
             if matches!(snapshot.auth_status, AuthStatus::Connected) {
                 save_history(&app, &history);
@@ -403,7 +415,6 @@ async fn usage_snapshot(
             Ok(snapshot)
         }
         Err(SnapshotError::RateLimited(retry_after)) => {
-            let mut g = gate.0.lock().expect("gate lock poisoned");
             let wait_secs = retry_after.unwrap_or(if g.backoff_secs == 0 {
                 BACKOFF_BASE_SECS
             } else {

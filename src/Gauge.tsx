@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { bandOf, fmtCountdown } from "./usage";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { bandOf, fmtCountdown, fmtResetAt } from "./usage";
 
 const TICKS = 40;
 const START = 135;
@@ -59,6 +59,11 @@ export function Gauge({ label, usedPct, resetsAtMs, nowMs, placeholder }: GaugeP
   const shown = useCountUp(pct);
   const lit = Math.round((shown / 100) * TICKS);
 
+  // The absolute reset label only changes at minute granularity, so keep it
+  // off the 1s clock tick that re-renders this component for the countdown.
+  const nowMin = Math.floor(nowMs / 60_000);
+  const resetAt = useMemo(() => fmtResetAt(resetsAtMs, nowMin * 60_000), [resetsAtMs, nowMin]);
+
   return (
     <div className="tk-gauge" data-status={bandOf(pct)}>
       <div className="tk-ring">
@@ -83,10 +88,13 @@ export function Gauge({ label, usedPct, resetsAtMs, nowMs, placeholder }: GaugeP
       <div className="lbl">{label}</div>
       <div className="reset">
         {placeholder ? (
-          <>waiting for data</>
+          <span>waiting for data</span>
         ) : (
           <>
-            resets in <b>{fmtCountdown(resetsAtMs - nowMs)}</b>
+            <span>
+              resets in <b>{fmtCountdown(resetsAtMs - nowMs)}</b>
+            </span>
+            <span className="at">{resetAt}</span>
           </>
         )}
       </div>

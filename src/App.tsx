@@ -4,6 +4,7 @@ import { Gauge } from "./Gauge";
 import { Mark } from "./Mark";
 import { Spark } from "./Spark";
 import { fetchUsage, fmtAgo, fmtCountdown, UsageSnapshot } from "./usage";
+import { useZoom } from "./zoom";
 import "./App.css";
 
 const REFRESH_INTERVAL_MS = 60_000;
@@ -53,6 +54,7 @@ function RefreshIcon() {
 
 function App() {
   const theme = useTheme();
+  const zoom = useZoom();
   const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [spinning, setSpinning] = useState(false);
@@ -154,22 +156,52 @@ function App() {
               <span className="tick" />
               <span>{fmtAgo(nowMs - snapshot.fetchedAtMs)}</span>
             </div>
-            <button
-              className={spinning ? "tk-refresh spinning" : "tk-refresh"}
-              title={
-                refreshBlocked
-                  ? `Refresh available in ${fmtCountdown(refreshBlockedUntil - nowMs)}`
-                  : "Refresh"
-              }
-              onClick={onRefreshClick}
-              disabled={refreshBlocked}
-            >
-              {refreshBlocked && !spinning ? (
-                <span className="count">{fmtShort(refreshBlockedUntil - nowMs)}</span>
-              ) : (
-                <RefreshIcon />
-              )}
-            </button>
+            <div className="tk-foot-actions">
+              <div className="tk-zoom" role="group" aria-label="Zoom">
+                <button
+                  className="zbtn"
+                  onClick={zoom.zoomOut}
+                  disabled={!zoom.canOut}
+                  title="Zoom out (⌘−)"
+                  aria-label="Zoom out"
+                >
+                  −
+                </button>
+                <button
+                  className="zlvl"
+                  onClick={zoom.reset}
+                  title="Reset zoom (⌘0)"
+                  aria-label="Reset zoom"
+                >
+                  {Math.round(zoom.zoom * 100)}%
+                </button>
+                <button
+                  className="zbtn"
+                  onClick={zoom.zoomIn}
+                  disabled={!zoom.canIn}
+                  title="Zoom in (⌘+)"
+                  aria-label="Zoom in"
+                >
+                  +
+                </button>
+              </div>
+              <button
+                className={spinning ? "tk-refresh spinning" : "tk-refresh"}
+                title={
+                  refreshBlocked
+                    ? `Refresh available in ${fmtCountdown(refreshBlockedUntil - nowMs)}`
+                    : "Refresh"
+                }
+                onClick={onRefreshClick}
+                disabled={refreshBlocked}
+              >
+                {refreshBlocked && !spinning ? (
+                  <span className="count">{fmtShort(refreshBlockedUntil - nowMs)}</span>
+                ) : (
+                  <RefreshIcon />
+                )}
+              </button>
+            </div>
           </footer>
 
           {lockedAuthStatus && <Gate authStatus={lockedAuthStatus} onRetry={refresh} />}

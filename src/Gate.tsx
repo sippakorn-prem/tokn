@@ -53,8 +53,8 @@ const COPY: Record<GateAuthStatus, { title: string; body: string; action: string
     note: "Tokn uses Claude Code's Keychain login",
   },
   expiredToken: {
-    title: "Claude Code login expired",
-    body: "Open Claude Code and sign in again, then return to Tokn and retry.",
+    title: "Claude Code session token expired",
+    body: "Run any Claude Code command to refresh the token, then retry.",
     action: "Retry",
     note: "Tokn does not manage Claude Code login",
   },

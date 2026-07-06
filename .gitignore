@@ -15,6 +15,9 @@ dist-ssr
 # Signing / notarization secrets
 .env
 
+# tokensave local code-graph cache
+.tokensave/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

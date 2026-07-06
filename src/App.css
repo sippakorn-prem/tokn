@@ -180,8 +180,13 @@ html, body { margin: 0; padding: 0; background: transparent; }
   margin-top: 5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
 }
 .tk-gauge .reset b { color: var(--cx-fg-1); font-weight: 500; }
+.tk-gauge .reset .at { font-size: 9.5px; color: var(--cx-fg-3); letter-spacing: 0.02em; }
 
 /* burn-rate sparkline */
 .tk-spark { padding: 13px 16px 12px; border-top: 1px solid var(--cx-border); }
@@ -235,8 +240,50 @@ html, body { margin: 0; padding: 0; background: transparent; }
 }
 /* live dot — the "fresh & connected" signal */
 .tk-updated .tick { width: 6px; height: 6px; border-radius: 50%; background: var(--cx-add); animation: tk-pulse 2.5s ease-in-out infinite; }
+.tk-foot-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* zoom stepper — −  100%  + */
+.tk-zoom {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  border: 1px solid var(--cx-border-2);
+  border-radius: 6px;
+  background: var(--cx-bg-1);
+  overflow: hidden;
+}
+.tk-zoom .zbtn {
+  width: 24px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--cx-fg-2);
+  font-family: var(--cx-mono);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.13s var(--cx-ease), background 0.13s var(--cx-ease);
+}
+.tk-zoom .zbtn:hover:not(:disabled) { color: var(--cx-fg); background: var(--cx-bg-2); }
+.tk-zoom .zbtn:disabled { opacity: 0.4; cursor: default; }
+.tk-zoom .zlvl {
+  min-width: 40px;
+  height: 100%;
+  border: 0;
+  border-left: 1px solid var(--cx-border);
+  border-right: 1px solid var(--cx-border);
+  background: transparent;
+  color: var(--cx-fg-2);
+  font-family: var(--cx-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: color 0.13s var(--cx-ease), background 0.13s var(--cx-ease);
+}
+.tk-zoom .zlvl:hover { color: var(--cx-fg); background: var(--cx-bg-2); }
+
 .tk-refresh {
-  margin-left: auto;
   width: 30px;
   height: 30px;
   display: inline-flex;
