@@ -4,6 +4,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{
     image::Image,
+    menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     LogicalPosition, LogicalSize, Manager, PhysicalPosition,
 };
@@ -212,7 +213,10 @@ fn to_window(label: &str, api: Option<ApiWindow>) -> UsageWindow {
 /// Burn-rate history survives restarts so the sparkline doesn't reset to
 /// "collecting data" on every launch.
 fn history_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    app.path().app_data_dir().ok().map(|d| d.join("history.json"))
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("history.json"))
 }
 
 fn load_history(app: &tauri::AppHandle) -> VecDeque<(u64, f64)> {
@@ -385,7 +389,8 @@ async fn usage_snapshot(
         // another call is already fetching — otherwise overlapping callers
         // (StrictMode double-mount, the 60s tick landing on a manual refresh,
         // the rate-limit-cleared refetch) would each hit the endpoint.
-        let within_spacing = now < g.next_fetch_at_ms && (g.last_snapshot.is_some() || g.rate_limited);
+        let within_spacing =
+            now < g.next_fetch_at_ms && (g.last_snapshot.is_some() || g.rate_limited);
         if within_spacing || g.in_flight {
             return Ok(g.cached_response());
         }
@@ -459,7 +464,11 @@ fn tray_ring_image(pct: f64) -> Image<'static> {
             let rel = (deg - START).rem_euclid(360.0);
 
             let ring_alpha = if rel <= SWEEP {
-                if rel <= fill_deg { 1.0 } else { 0.30 }
+                if rel <= fill_deg {
+                    1.0
+                } else {
+                    0.30
+                }
             } else {
                 0.0
             };
@@ -489,7 +498,9 @@ fn same_anchor(a: Option<PhysicalPosition<i32>>, b: Option<PhysicalPosition<i32>
 
 fn to_logical_pos(p: &tauri::Position, scale: f64) -> LogicalPosition<f64> {
     match *p {
-        tauri::Position::Physical(p) => LogicalPosition::new(p.x as f64 / scale, p.y as f64 / scale),
+        tauri::Position::Physical(p) => {
+            LogicalPosition::new(p.x as f64 / scale, p.y as f64 / scale)
+        }
         tauri::Position::Logical(p) => p,
     }
 }
@@ -579,14 +590,15 @@ fn toggle_popover(app: &tauri::AppHandle, tray_rect: &tauri::Rect) {
     }
 
     let hidden = app.state::<PopoverHiddenAt>();
-    let closed_by_this_click = hidden
-        .0
-        .lock()
-        .ok()
-        .and_then(|mut g| g.take())
-        .is_some_and(|(at, pos)| {
-            at.elapsed() < Duration::from_millis(400) && same_anchor(Some(pos), anchor)
-        });
+    let closed_by_this_click =
+        hidden
+            .0
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take())
+            .is_some_and(|(at, pos)| {
+                at.elapsed() < Duration::from_millis(400) && same_anchor(Some(pos), anchor)
+            });
     if closed_by_this_click {
         // The focus loss from this same click already hid it at this tray:
         // the click means "close", so don't reopen.
@@ -596,14 +608,38 @@ fn toggle_popover(app: &tauri::AppHandle, tray_rect: &tauri::Rect) {
     let _ = window.set_focus();
 }
 
+/// Quit the app. Fired by the tray menu's Quit item and the popover's ⌘Q.
+#[tauri::command]
+fn quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+/// Check GitHub Releases for a newer signed build and install it silently in
+/// the background. The swapped bundle takes effect on the next launch, so we
+/// never interrupt the running session. Any failure (offline, no update) is a
+/// no-op — updates are best-effort.
+fn spawn_update_check(app: &tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(updater) = handle.updater() else {
+            return;
+        };
+        if let Ok(Some(update)) = updater.check().await {
+            let _ = update.download_and_install(|_, _| {}, || {}).await;
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(FetchGate(Mutex::new(GateState::default())))
         .manage(PopoverHiddenAt(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![usage_snapshot])
+        .invoke_handler(tauri::generate_handler![usage_snapshot, quit])
         .setup(|app| {
             // Menu bar app: no Dock icon, no app switcher entry.
             #[cfg(target_os = "macos")]
@@ -611,11 +647,25 @@ pub fn run() {
 
             app.manage(UsageHistory(Mutex::new(load_history(app.handle()))));
 
+            // Right-click menu — the app's only quit path (accessory apps have
+            // no Dock icon or menu bar). Left-click still toggles the popover.
+            let quit_item = MenuItemBuilder::with_id("quit", "Quit Tokn")
+                .accelerator("Cmd+Q")
+                .build(app)?;
+            let tray_menu = MenuBuilder::new(app).item(&quit_item).build()?;
+
             // Empty ring until the first successful fetch.
             TrayIconBuilder::with_id(TRAY_ID)
                 .icon(tray_ring_image(0.0))
                 .icon_as_template(true)
                 .tooltip("Tokn")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    if event.id.as_ref() == "quit" {
+                        app.exit(0);
+                    }
+                })
                 .on_tray_icon_event(|tray, event| {
                     tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
                     if let TrayIconEvent::Click {
@@ -629,6 +679,9 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Best-effort: pull a newer signed build in the background.
+            spawn_update_check(app.handle());
 
             Ok(())
         })

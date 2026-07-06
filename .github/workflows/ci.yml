@@ -1,0 +1,53 @@
+name: ci
+
+# Fast checks on every push / PR to the working branches, so main stays
+# releasable. Releases themselves are cut by release.yml on a v* tag.
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # macOS runner: the crate pulls in macOS-only deps (AppKit/WebKit), so it
+    # only compiles here.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # tsc typecheck + vite build. Also produces dist/, which the Rust
+      # `generate_context!` macro embeds — so clippy needs it to exist.
+      - name: Frontend typecheck + build
+        run: pnpm build
+
+      - name: rustfmt
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

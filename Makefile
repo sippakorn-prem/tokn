@@ -4,6 +4,13 @@
 -include .env
 export
 
+# The bundle emits updater artifacts (createUpdaterArtifacts), so `tauri build`
+# needs the updater signing key. TAURI_SIGNING_PRIVATE_KEY accepts a file path
+# (or the key contents); default to the local key unless .env overrides.
+TAURI_SIGNING_PRIVATE_KEY ?= $(HOME)/.tauri/tokn-updater.key
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD ?=
+export TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+
 .PHONY: help install dev build release notary-status check check-frontend check-rust clean
 
 help: ## Show available targets

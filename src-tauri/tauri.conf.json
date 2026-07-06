@@ -33,12 +33,26 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
+    "category": "DeveloperTool",
+    "shortDescription": "Claude Code usage meter",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/sippakorn-prem/tokn/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk0RERGQ0FBODFCRkIyQUQKUldTdHNyK0JxdnpkbEtBOFpjc0RZRVNPb1dWWE1sZTFuL2lDcUdaeGNSb0taemNMZUlvVUk4WlIK"
+    }
   }
 }

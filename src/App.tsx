@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Gate } from "./Gate";
 import { Gauge } from "./Gauge";
 import { Mark } from "./Mark";
@@ -108,6 +109,18 @@ function App() {
       clearInterval(clockTimer);
     };
   }, [refresh]);
+
+  // ⌘Q quits while the popover is focused (mirrors the tray menu's Quit).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "q") {
+        e.preventDefault();
+        void invoke("quit");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const lockedAuthStatus =
     snapshot?.authStatus === "connected" ? null : snapshot?.authStatus ?? null;
