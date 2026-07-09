@@ -600,9 +600,7 @@ fn popover_target(
 mod popover_panel {
     #![allow(clippy::unused_unit)]
 
-    use tauri_nspanel::{
-        tauri_panel, CollectionBehavior, PanelLevel, StyleMask, WebviewWindowExt,
-    };
+    use tauri_nspanel::{tauri_panel, CollectionBehavior, PanelLevel, StyleMask, WebviewWindowExt};
 
     tauri_panel! {
         panel!(PopoverPanel {
