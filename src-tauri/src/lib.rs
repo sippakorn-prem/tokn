@@ -590,6 +590,9 @@ fn popover_target(
 // reclassed to) and `PopoverPanelDelegate` (its NSWindowDelegate, used to
 // auto-dismiss on click-away).
 #[cfg(target_os = "macos")]
+// The panel_event! grammar requires an explicit `-> ()` return, which the
+// macro then emits as a unit-returning fn — allow the lint it trips.
+#[allow(clippy::unused_unit)]
 tauri_panel! {
     panel!(PopoverPanel {
         config: {
