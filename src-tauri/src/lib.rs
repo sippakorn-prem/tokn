@@ -24,6 +24,8 @@ const MIN_FETCH_SPACING_MS: u64 = 30_000;
 /// 429 backoff when the server sends no Retry-After: 2m → 4m → … capped 15m.
 const BACKOFF_BASE_SECS: u64 = 120;
 const BACKOFF_CAP_SECS: u64 = 900;
+/// How often the running app re-checks GitHub Releases for a newer build.
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
@@ -614,47 +616,61 @@ fn quit(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-/// Check GitHub Releases for a newer signed build and install it silently in
-/// the background. The swapped bundle takes effect on the next launch, so we
-/// never interrupt the running session. Any failure (offline, no update) is a
-/// no-op — updates are best-effort.
+/// Relaunch into an already-downloaded update — the install happened in the
+/// background, so restarting just swaps in the new bundle. Fired by the
+/// popover's "restart to update" affordance.
+#[tauri::command]
+fn restart(app: tauri::AppHandle) {
+    app.restart();
+}
+
+/// The version of an update that has been downloaded + installed and is waiting
+/// for a restart to take effect (if any). Held so the popover can show the
+/// "restart to update" prompt even if it mounted after the `update-ready`
+/// event fired.
+#[derive(Default)]
+struct PendingUpdate(Mutex<Option<String>>);
+
+#[tauri::command]
+fn pending_update(state: tauri::State<'_, PendingUpdate>) -> Option<String> {
+    state.0.lock().ok().and_then(|g| g.clone())
+}
+
+/// Poll GitHub Releases for a newer signed build — immediately on launch, then
+/// every `UPDATE_CHECK_INTERVAL`. A found update is downloaded and installed in
+/// the background (best-effort; never interrupts the running session), then the
+/// popover is told to offer a restart. Polling stops once one is staged.
 fn spawn_update_check(app: &tauri::AppHandle) {
-    use tauri_plugin_updater::UpdaterExt;
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let Ok(updater) = handle.updater() else {
-            return;
-        };
-        if let Ok(Some(update)) = updater.check().await {
-            let _ = update.download_and_install(|_, _| {}, || {}).await;
+        loop {
+            if check_and_stage_update(&handle).await {
+                break;
+            }
+            tokio::time::sleep(UPDATE_CHECK_INTERVAL).await;
         }
     });
 }
 
-/// Let the popover appear while a full-screen app owns the active Space.
-///
-/// Tauri's `visibleOnAllWorkspaces` only sets `canJoinAllSpaces`. Without
-/// `fullScreenAuxiliary` the window never shows over a full-screen Space, so a
-/// tray click there looks like it does nothing. We OR the missing flags onto
-/// whatever Tauri already configured.
-#[cfg(target_os = "macos")]
-fn allow_over_fullscreen(window: &tauri::WebviewWindow) {
-    use objc::{msg_send, sel, sel_impl};
+async fn check_and_stage_update(app: &tauri::AppHandle) -> bool {
+    use tauri::{Emitter, Manager};
+    use tauri_plugin_updater::UpdaterExt;
 
-    // NSWindowCollectionBehavior bits.
-    const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
-    const STATIONARY: usize = 1 << 4;
-    const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
-
-    let Ok(ns_window) = window.ns_window() else {
-        return;
+    let Ok(updater) = app.updater() else {
+        return false;
     };
-    let ns_window = ns_window as *mut objc::runtime::Object;
-    unsafe {
-        let current: usize = msg_send![ns_window, collectionBehavior];
-        let behavior = current | CAN_JOIN_ALL_SPACES | STATIONARY | FULL_SCREEN_AUXILIARY;
-        let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
+    let Ok(Some(update)) = updater.check().await else {
+        return false;
+    };
+    let version = update.version.clone();
+    if update.download_and_install(|_, _| {}, || {}).await.is_err() {
+        return false;
     }
+    if let Ok(mut pending) = app.state::<PendingUpdate>().0.lock() {
+        *pending = Some(version.clone());
+    }
+    let _ = app.emit("update-ready", version);
+    true
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -665,7 +681,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(FetchGate(Mutex::new(GateState::default())))
         .manage(PopoverHiddenAt(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![usage_snapshot, quit])
+        .manage(PendingUpdate::default())
+        .invoke_handler(tauri::generate_handler![
+            usage_snapshot,
+            quit,
+            restart,
+            pending_update
+        ])
         .setup(|app| {
             // Menu bar app: no Dock icon, no app switcher entry.
             #[cfg(target_os = "macos")]
@@ -705,12 +727,6 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-
-            // Show the popover even over full-screen Spaces.
-            #[cfg(target_os = "macos")]
-            if let Some(window) = app.get_webview_window("main") {
-                allow_over_fullscreen(&window);
-            }
 
             // Best-effort: pull a newer signed build in the background.
             spawn_update_check(app.handle());

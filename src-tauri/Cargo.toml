@@ -27,12 +27,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 time = { version = "0.3", features = ["parsing"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-objc = "0.2"
-
-[lints.rust]
-# objc 0.2's msg_send!/sel! macros expand a `feature = "cargo-clippy"` cfg
-# check that this crate doesn't define, tripping unexpected_cfgs under
-# `clippy -D warnings`. The lint is noise here, not a real config issue.
-unexpected_cfgs = { level = "allow" }
+tokio = { version = "1", features = ["time"] }

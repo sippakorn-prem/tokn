@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Gate } from "./Gate";
 import { Gauge } from "./Gauge";
 import { Mark } from "./Mark";
@@ -110,6 +111,20 @@ function App() {
     };
   }, [refresh]);
 
+  // Show "restart to update" once the backend has staged a downloaded update.
+  // Query on mount in case the event fired before we started listening, and
+  // also listen for it landing while we're open.
+  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+  useEffect(() => {
+    invoke<string | null>("pending_update")
+      .then((v) => v && setUpdateVersion(v))
+      .catch(() => {});
+    const unlisten = listen<string>("update-ready", (e) => setUpdateVersion(e.payload));
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
+
   // ⌘Q quits while the popover is focused (mirrors the tray menu's Quit).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -133,6 +148,17 @@ function App() {
         <span className="tk-word">Tokn</span>
         <span className="tk-tagline">claude code usage</span>
       </header>
+
+      {updateVersion && (
+        <button
+          className="tk-updatebar"
+          onClick={() => void invoke("restart")}
+          title="Restart Tokn to apply the update"
+        >
+          <span>Update {updateVersion} ready</span>
+          <span className="cta">Restart to update ↻</span>
+        </button>
+      )}
 
       {error && <div className="tk-error">{error}</div>}
       {rateLimited && (

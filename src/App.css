@@ -381,6 +381,28 @@ html, body { margin: 0; padding: 0; background: transparent; }
   word-break: break-word;
 }
 
+/* update downloaded & staged: one tap to relaunch into the new version */
+.tk-updatebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--cx-border);
+  background: var(--cx-bg-1);
+  color: var(--cx-fg-2);
+  font-family: var(--cx-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.13s var(--cx-ease), color 0.13s var(--cx-ease);
+}
+.tk-updatebar .cta { color: var(--cx-add); font-weight: 500; white-space: nowrap; }
+.tk-updatebar:hover { background: var(--cx-bg-2); color: var(--cx-fg); }
+.tk-updatebar:hover .cta { color: var(--cx-add); filter: brightness(1.08); }
+
 /* 429 from the usage endpoint: stale-but-real data, calm amber note */
 .tk-ratelimit {
   font-family: var(--cx-mono);
