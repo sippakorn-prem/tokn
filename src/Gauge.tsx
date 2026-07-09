@@ -89,13 +89,15 @@ export function Gauge({ label, usedPct, resetsAtMs, nowMs, placeholder }: GaugeP
       <div className="reset">
         {placeholder ? (
           <span>waiting for data</span>
-        ) : (
+        ) : resetsAtMs > 0 ? (
           <>
             <span>
               resets in <b>{fmtCountdown(resetsAtMs - nowMs)}</b>
             </span>
             <span className="at">{resetAt}</span>
           </>
+        ) : (
+          <span className="at">no active session</span>
         )}
       </div>
     </div>

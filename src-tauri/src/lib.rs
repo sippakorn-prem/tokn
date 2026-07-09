@@ -8,11 +8,9 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     LogicalPosition, LogicalSize, Manager, PhysicalPosition,
 };
-use tauri_plugin_positioner::{Position, WindowExt};
 #[cfg(target_os = "macos")]
-use tauri_nspanel::{
-    tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
-};
+use tauri_nspanel::ManagerExt;
+use tauri_plugin_positioner::{Position, WindowExt};
 
 const TRAY_ID: &str = "tokn-tray";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
@@ -108,8 +106,12 @@ fn read_access_token() -> Result<TokenRead, String> {
     if !output.status.success() {
         return Ok(classify_keychain_failure(&output));
     }
-    let creds: StoredCreds = serde_json::from_slice(&output.stdout)
-        .map_err(|_| "unexpected credential format in Keychain".to_string())?;
+    let Ok(creds) = serde_json::from_slice::<StoredCreds>(&output.stdout) else {
+        // Unreadable or reshaped credential blob (e.g. Claude Code changed its
+        // format). Treat it as "not logged in" so the popover shows the connect
+        // gate rather than a hard error — running Claude Code rewrites it.
+        return Ok(TokenRead::Missing);
+    };
     if creds.claude_ai_oauth.expires_at <= now_ms() + EXPIRY_MARGIN_MS {
         return Ok(TokenRead::Expired);
     }
@@ -140,8 +142,14 @@ fn classify_keychain_failure(output: &std::process::Output) -> TokenRead {
 
 #[derive(Deserialize)]
 struct ApiWindow {
-    utilization: f64,
-    resets_at: String,
+    // The API sends `null` for these when a window is idle (e.g. no active
+    // 5-hour session), and has added sibling fields we don't read. Keep both
+    // optional so one empty window can't fail the whole response and blank
+    // every gauge.
+    #[serde(default)]
+    utilization: Option<f64>,
+    #[serde(default)]
+    resets_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -192,9 +200,17 @@ async fn fetch_usage(token: &str) -> Result<ApiUsage, UsageFetchError> {
             "usage endpoint returned {status}"
         )));
     }
-    resp.json::<ApiUsage>()
+    let body = resp
+        .text()
         .await
-        .map_err(|e| UsageFetchError::Other(format!("unexpected usage response: {e}")))
+        .map_err(|e| UsageFetchError::Other(format!("could not read usage response: {e}")))?;
+    serde_json::from_str::<ApiUsage>(&body).map_err(|e| {
+        // Surface a short snippet of the actual body (usage %s and reset times —
+        // no credentials) so a changed/unexpected response shape is diagnosable
+        // instead of an opaque "error decoding response body".
+        let snippet: String = body.chars().take(200).collect();
+        UsageFetchError::Other(format!("unexpected usage response: {e} · body: {snippet}"))
+    })
 }
 
 fn parse_resets_at(iso: &str) -> u64 {
@@ -205,7 +221,10 @@ fn parse_resets_at(iso: &str) -> u64 {
 
 fn to_window(label: &str, api: Option<ApiWindow>) -> UsageWindow {
     let (pct, resets) = api
-        .map(|w| (w.utilization, parse_resets_at(&w.resets_at)))
+        .map(|w| {
+            let resets = w.resets_at.as_deref().map(parse_resets_at).unwrap_or(0);
+            (w.utilization.unwrap_or(0.0), resets)
+        })
         .unwrap_or((0.0, 0));
     UsageWindow {
         label: label.into(),
@@ -565,56 +584,65 @@ fn popover_target(
     None
 }
 
-// Defines `PopoverPanel` (the non-activating panel type the popover window is
-// reclassed to) and `PopoverPanelDelegate` (its NSWindowDelegate, used to
-// auto-dismiss on click-away).
+/// Non-activating `NSPanel` support for the popover. A plain `NSWindow` can't
+/// open over another app's full-screen Space: `show`/`set_focus` activates
+/// Tokn, and macOS resolves that by switching you to the desktop Space (what
+/// you saw). A non-activating panel shows and takes clicks without activating
+/// the app, so it overlays full-screen apps — the standard macOS menu-bar
+/// trick. `CanJoinAllSpaces | FullScreenAuxiliary` lets it join whichever Space
+/// (regular or full-screen) is frontmost.
+///
+/// Lives in its own module for the inner `#![allow(clippy::unused_unit)]`: the
+/// `panel_event!` grammar requires an explicit `-> ()` return, which the macro
+/// emits as a unit-returning fn — and an `#[allow]` on the invocation alone
+/// doesn't reach into the expansion.
 #[cfg(target_os = "macos")]
-tauri_panel! {
-    panel!(PopoverPanel {
-        config: {
-            // Non-activating, but still allowed to become key so it receives
-            // clicks and fires resign-key when focus moves away.
-            can_become_key_window: true,
-            is_floating_panel: true
-        }
-    })
+mod popover_panel {
+    #![allow(clippy::unused_unit)]
 
-    panel_event!(PopoverPanelDelegate {
-        window_did_resign_key(notification: &NSNotification) -> ()
-    })
-}
+    use tauri::Manager; // the generated from_window() calls window.app_handle()
+    use tauri_nspanel::{tauri_panel, CollectionBehavior, PanelLevel, StyleMask, WebviewWindowExt};
 
-/// Reclass the popover window to a non-activating `NSPanel`. A plain `NSWindow`
-/// can't open over another app's full-screen Space: `show`/`set_focus`
-/// activates Tokn, and macOS resolves that by switching you to the desktop
-/// Space (what you saw). A non-activating panel shows and takes clicks without
-/// activating the app, so it overlays full-screen apps — the standard macOS
-/// menu-bar-popover trick. `CanJoinAllSpaces | FullScreenAuxiliary` lets it
-/// join whichever Space (regular or full-screen) is frontmost.
-#[cfg(target_os = "macos")]
-fn install_popover_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
-    let Ok(panel) = window.to_panel::<PopoverPanel>() else {
-        return;
-    };
-    panel.set_level(PanelLevel::Floating.value());
-    panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
-    panel.set_collection_behavior(
-        CollectionBehavior::new()
-            .can_join_all_spaces()
-            .full_screen_auxiliary()
-            .into(),
-    );
-    // Keep the transparent, rounded look — the panel would otherwise paint an
-    // opaque system background behind the CSS popover.
-    panel.set_transparent(true);
+    tauri_panel! {
+        panel!(PopoverPanel {
+            config: {
+                // Non-activating, but still allowed to become key so it
+                // receives clicks and fires resign-key when focus moves away.
+                can_become_key_window: true,
+                is_floating_panel: true
+            }
+        })
 
-    // Click-away dismissal: a non-activating panel resigns key instead of
-    // firing Tauri's `Focused(false)`, so drive the hide from the delegate.
-    // `set_event_handler` retains the delegate, so the local can drop.
-    let delegate = PopoverPanelDelegate::new();
-    let handle = app.clone();
-    delegate.window_did_resign_key(move |_| dismiss_popover(&handle));
-    panel.set_event_handler(Some(delegate.as_ref()));
+        panel_event!(PopoverPanelDelegate {
+            window_did_resign_key(notification: &NSNotification) -> ()
+        })
+    }
+
+    /// Reclass the popover window and wire its click-away dismissal.
+    pub(crate) fn install(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+        let Ok(panel) = window.to_panel::<PopoverPanel>() else {
+            return;
+        };
+        panel.set_level(PanelLevel::Floating.value());
+        panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+        panel.set_collection_behavior(
+            CollectionBehavior::new()
+                .can_join_all_spaces()
+                .full_screen_auxiliary()
+                .into(),
+        );
+        // Keep the transparent, rounded look — the panel would otherwise paint
+        // an opaque system background behind the CSS popover.
+        panel.set_transparent(true);
+
+        // Click-away dismissal: a non-activating panel resigns key instead of
+        // firing Tauri's `Focused(false)`, so drive the hide from the delegate.
+        // `set_event_handler` retains the delegate, so the local can drop.
+        let delegate = PopoverPanelDelegate::new();
+        let handle = app.clone();
+        delegate.window_did_resign_key(move |_| super::dismiss_popover(&handle));
+        panel.set_event_handler(Some(delegate.as_ref()));
+    }
 }
 
 /// Hide the popover and record where/when — a tray click that stole key (and so
@@ -836,7 +864,7 @@ pub fn run() {
             // full-screen apps' Spaces without activating Tokn.
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
-                install_popover_panel(app.handle(), &window);
+                popover_panel::install(app.handle(), &window);
             }
 
             app.manage(UsageHistory(Mutex::new(load_history(app.handle()))));
@@ -904,4 +932,51 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Locks the usage-response contract: the API sends `null` for idle windows
+    /// and keeps adding sibling fields (`*_in_dollars`, …), so parsing must
+    /// tolerate both without failing the whole response. Regression guard for
+    /// the "error decoding response body" bug that blanked every gauge.
+    #[test]
+    fn usage_tolerates_null_fields_and_unknown_keys() {
+        let body = r#"{
+            "five_hour":  { "utilization": null, "resets_at": null, "cost_in_dollars": null },
+            "seven_day":  { "utilization": 74.0, "resets_at": "2026-07-13T09:00:00.473221+00:00", "limit_in_dollars": null },
+            "brand_new_top_level_field": 123
+        }"#;
+
+        let usage: ApiUsage =
+            serde_json::from_str(body).expect("null fields and unknown keys must not fail parsing");
+
+        let session = to_window("current session", usage.five_hour);
+        assert!(session.used_pct.abs() < 1e-9);
+        assert_eq!(session.resets_at_ms, 0); // null resets_at -> 0 (idle) sentinel
+
+        let weekly = to_window("weekly limit", usage.seven_day);
+        assert!((weekly.used_pct - 74.0).abs() < 1e-9);
+        assert!(weekly.resets_at_ms > 0); // fractional-second RFC3339 must parse
+    }
+
+    /// Missing windows (and a bare `{}`) must degrade to zeroed, non-panicking
+    /// gauges rather than erroring.
+    #[test]
+    fn usage_tolerates_missing_windows() {
+        let usage: ApiUsage = serde_json::from_str("{}").expect("empty object is valid");
+        assert!(usage.five_hour.is_none());
+        assert!(usage.seven_day.is_none());
+        let session = to_window("current session", usage.five_hour);
+        assert!(session.used_pct.abs() < 1e-9);
+        assert_eq!(session.resets_at_ms, 0);
+    }
+
+    /// The exact reset-time shape observed from the live API.
+    #[test]
+    fn resets_at_parses_fractional_rfc3339() {
+        assert!(parse_resets_at("2026-07-13T09:00:00.473221+00:00") > 0);
+    }
 }
