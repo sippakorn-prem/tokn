@@ -9,6 +9,10 @@ use tauri::{
     LogicalPosition, LogicalSize, Manager, PhysicalPosition,
 };
 use tauri_plugin_positioner::{Position, WindowExt};
+#[cfg(target_os = "macos")]
+use tauri_nspanel::{
+    tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
+};
 
 const TRAY_ID: &str = "tokn-tray";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
@@ -561,11 +565,129 @@ fn popover_target(
     None
 }
 
+// Defines `PopoverPanel` (the non-activating panel type the popover window is
+// reclassed to) and `PopoverPanelDelegate` (its NSWindowDelegate, used to
+// auto-dismiss on click-away).
+#[cfg(target_os = "macos")]
+tauri_panel! {
+    panel!(PopoverPanel {
+        config: {
+            // Non-activating, but still allowed to become key so it receives
+            // clicks and fires resign-key when focus moves away.
+            can_become_key_window: true,
+            is_floating_panel: true
+        }
+    })
+
+    panel_event!(PopoverPanelDelegate {
+        window_did_resign_key(notification: &NSNotification) -> ()
+    })
+}
+
+/// Reclass the popover window to a non-activating `NSPanel`. A plain `NSWindow`
+/// can't open over another app's full-screen Space: `show`/`set_focus`
+/// activates Tokn, and macOS resolves that by switching you to the desktop
+/// Space (what you saw). A non-activating panel shows and takes clicks without
+/// activating the app, so it overlays full-screen apps — the standard macOS
+/// menu-bar-popover trick. `CanJoinAllSpaces | FullScreenAuxiliary` lets it
+/// join whichever Space (regular or full-screen) is frontmost.
+#[cfg(target_os = "macos")]
+fn install_popover_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let Ok(panel) = window.to_panel::<PopoverPanel>() else {
+        return;
+    };
+    panel.set_level(PanelLevel::Floating.value());
+    panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+    panel.set_collection_behavior(
+        CollectionBehavior::new()
+            .can_join_all_spaces()
+            .full_screen_auxiliary()
+            .into(),
+    );
+    // Keep the transparent, rounded look — the panel would otherwise paint an
+    // opaque system background behind the CSS popover.
+    panel.set_transparent(true);
+
+    // Click-away dismissal: a non-activating panel resigns key instead of
+    // firing Tauri's `Focused(false)`, so drive the hide from the delegate.
+    // `set_event_handler` retains the delegate, so the local can drop.
+    let delegate = PopoverPanelDelegate::new();
+    let handle = app.clone();
+    delegate.window_did_resign_key(move |_| dismiss_popover(&handle));
+    panel.set_event_handler(Some(delegate.as_ref()));
+}
+
+/// Hide the popover and record where/when — a tray click that stole key (and so
+/// triggered the resign-key that called this) can then tell "close" from
+/// "reopen on another display".
+#[cfg(target_os = "macos")]
+fn dismiss_popover(app: &tauri::AppHandle) {
+    let Ok(panel) = app.get_webview_panel("main") else {
+        return;
+    };
+    if !panel.is_visible() {
+        return;
+    }
+    let stamped = app
+        .get_webview_window("main")
+        .and_then(|w| w.outer_position().ok())
+        .map(|pos| (Instant::now(), pos));
+    if let Ok(mut g) = app.state::<PopoverHiddenAt>().0.lock() {
+        *g = stamped;
+    }
+    panel.hide();
+}
+
+/// Show the popover. On macOS it becomes key without activating the app (it's a
+/// non-activating panel), which is what lets it float over full-screen apps.
+#[cfg(target_os = "macos")]
+fn popover_show(app: &tauri::AppHandle) {
+    if let Ok(panel) = app.get_webview_panel("main") {
+        panel.show_and_make_key();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn popover_show(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn popover_hide(app: &tauri::AppHandle) {
+    if let Ok(panel) = app.get_webview_panel("main") {
+        panel.hide();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn popover_hide(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn popover_is_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_panel("main")
+        .map(|p| p.is_visible())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn popover_is_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
 fn toggle_popover(app: &tauri::AppHandle, tray_rect: &tauri::Rect) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    let was_visible = window.is_visible().unwrap_or(false);
+    let was_visible = popover_is_visible(app);
     let anchor_before = window.outer_position().ok();
     // Anchor to the tray icon that was clicked — each display has its own
     // menu bar. The positioner plugin is only the fallback: it mixes physical
@@ -583,10 +705,10 @@ fn toggle_popover(app: &tauri::AppHandle, tray_rect: &tauri::Rect) {
 
     if was_visible {
         if same_anchor(anchor, anchor_before) {
-            let _ = window.hide();
+            popover_hide(app);
         } else {
             // Clicked the tray on another display: already moved there, keep open.
-            let _ = window.set_focus();
+            popover_show(app);
         }
         return;
     }
@@ -606,8 +728,7 @@ fn toggle_popover(app: &tauri::AppHandle, tray_rect: &tauri::Rect) {
         // the click means "close", so don't reopen.
         return;
     }
-    let _ = window.show();
-    let _ = window.set_focus();
+    popover_show(app);
 }
 
 /// Quit the app. Fired by the tray menu's Quit item and the popover's ⌘Q.
@@ -644,7 +765,8 @@ fn spawn_update_check(app: &tauri::AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
-            if check_and_stage_update(&handle).await {
+            // Background poll ignores failures and just retries next interval.
+            if stage_update(&handle).await.unwrap_or(false) {
                 break;
             }
             tokio::time::sleep(UPDATE_CHECK_INTERVAL).await;
@@ -652,33 +774,49 @@ fn spawn_update_check(app: &tauri::AppHandle) {
     });
 }
 
-async fn check_and_stage_update(app: &tauri::AppHandle) -> bool {
+/// Check GitHub Releases once and, if a newer signed build exists, download and
+/// install it in the background and stage it for restart. Returns whether an
+/// update was staged (`false` = already on the latest version). `Err` carries a
+/// real failure so a manual check can distinguish "up to date" from "failed".
+async fn stage_update(app: &tauri::AppHandle) -> Result<bool, String> {
     use tauri::{Emitter, Manager};
     use tauri_plugin_updater::UpdaterExt;
 
-    let Ok(updater) = app.updater() else {
-        return false;
-    };
-    let Ok(Some(update)) = updater.check().await else {
-        return false;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Ok(false);
     };
     let version = update.version.clone();
-    if update.download_and_install(|_, _| {}, || {}).await.is_err() {
-        return false;
-    }
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
     if let Ok(mut pending) = app.state::<PendingUpdate>().0.lock() {
         *pending = Some(version.clone());
     }
     let _ = app.emit("update-ready", version);
-    true
+    Ok(true)
+}
+
+/// Manual "check for updates" from the popover. Same path as the background
+/// poll, but surfaces the outcome: `Ok(true)` staged an update (the popover
+/// shows the restart prompt via `update-ready`), `Ok(false)` is up to date,
+/// `Err` is a failed check.
+#[tauri::command]
+async fn check_for_update(app: tauri::AppHandle) -> Result<bool, String> {
+    stage_update(&app).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_positioner::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build());
+    // Non-activating panel support (popover over full-screen apps).
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+    builder
         .manage(FetchGate(Mutex::new(GateState::default())))
         .manage(PopoverHiddenAt(Mutex::new(None)))
         .manage(PendingUpdate::default())
@@ -686,12 +824,20 @@ pub fn run() {
             usage_snapshot,
             quit,
             restart,
-            pending_update
+            pending_update,
+            check_for_update
         ])
         .setup(|app| {
             // Menu bar app: no Dock icon, no app switcher entry.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Reclass the popover to a non-activating panel so it can open over
+            // full-screen apps' Spaces without activating Tokn.
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                install_popover_panel(app.handle(), &window);
+            }
 
             app.manage(UsageHistory(Mutex::new(load_history(app.handle()))));
 
@@ -737,6 +883,10 @@ pub fn run() {
             // Popover behavior: clicking anywhere else dismisses it. Record
             // where it was anchored so a tray click that caused this focus
             // loss can tell "toggle closed" from "reopen on another display".
+            // On macOS the non-activating panel drives this from its delegate
+            // (`dismiss_popover`) instead — Tauri's own focus events don't fire
+            // for it — so this path is only for other platforms.
+            #[cfg(not(target_os = "macos"))]
             if let tauri::WindowEvent::Focused(false) = event {
                 if window.is_visible().unwrap_or(false) {
                     let hidden = window.app_handle().state::<PopoverHiddenAt>();
@@ -749,6 +899,8 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
+            #[cfg(target_os = "macos")]
+            let _ = (window, event);
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

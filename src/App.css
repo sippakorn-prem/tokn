@@ -303,6 +303,39 @@ html, body { margin: 0; padding: 0; background: transparent; }
 .tk-refresh.spinning svg { animation: tk-spin 0.7s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
 @keyframes tk-spin { to { transform: rotate(360deg); } }
 
+/* app meta strip — version + manual update check, always visible */
+.tk-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 14px 8px 16px;
+  border-top: 1px solid var(--cx-border);
+}
+.tk-meta .ver {
+  font-family: var(--cx-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--cx-fg-4);
+  font-variant-numeric: tabular-nums;
+}
+.tk-check {
+  border: 0;
+  background: transparent;
+  padding: 2px 3px;
+  font-family: var(--cx-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--cx-fg-3);
+  cursor: pointer;
+  transition: color 0.13s var(--cx-ease);
+}
+.tk-check:hover:not(:disabled) { color: var(--cx-fg); }
+.tk-check:disabled { cursor: default; }
+.tk-check[data-state="checking"] { color: var(--cx-fg-4); }
+.tk-check[data-state="uptodate"] { color: var(--cx-add); }
+.tk-check[data-state="failed"] { color: var(--cx-del); }
+
 /* —— connect gate (first run / disconnected) —— */
 .tk-body { position: relative; flex: 1; display: flex; flex-direction: column; }
 .tk-body.gated > .tk-gauges,

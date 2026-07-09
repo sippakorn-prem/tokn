@@ -7,7 +7,21 @@ import { Mark } from "./Mark";
 import { Spark } from "./Spark";
 import { fetchUsage, fmtAgo, fmtCountdown, UsageSnapshot } from "./usage";
 import { useZoom } from "./zoom";
+import tauriConf from "../src-tauri/tauri.conf.json";
 import "./App.css";
+
+const VERSION = tauriConf.version;
+/** How long the transient "up to date" / "check failed" states linger. */
+const CHECK_STATUS_MS = 3500;
+
+type CheckState = "idle" | "checking" | "uptodate" | "failed";
+
+const CHECK_LABEL: Record<CheckState, string> = {
+  idle: "Check for updates",
+  checking: "Checking…",
+  uptodate: "Up to date ✓",
+  failed: "Check failed — retry",
+};
 
 const REFRESH_INTERVAL_MS = 60_000;
 const MIN_SPIN_MS = 720;
@@ -124,6 +138,22 @@ function App() {
       void unlisten.then((off) => off());
     };
   }, []);
+
+  // Manual "check for updates". A found update stages itself and fires
+  // `update-ready` (handled above), so here we only surface up-to-date/failed.
+  const [checkState, setCheckState] = useState<CheckState>("idle");
+  const onCheckUpdate = () => {
+    if (checkState === "checking") return;
+    setCheckState("checking");
+    invoke<boolean>("check_for_update")
+      .then((staged) => setCheckState(staged ? "idle" : "uptodate"))
+      .catch(() => setCheckState("failed"));
+  };
+  useEffect(() => {
+    if (checkState !== "uptodate" && checkState !== "failed") return;
+    const t = setTimeout(() => setCheckState("idle"), CHECK_STATUS_MS);
+    return () => clearTimeout(t);
+  }, [checkState]);
 
   // ⌘Q quits while the popover is focused (mirrors the tray menu's Quit).
   useEffect(() => {
@@ -246,6 +276,20 @@ function App() {
           {lockedAuthStatus && <Gate authStatus={lockedAuthStatus} onRetry={refresh} />}
         </div>
       )}
+
+      <div className="tk-meta">
+        <span className="ver">Tokn v{VERSION}</span>
+        {!updateVersion && (
+          <button
+            className="tk-check"
+            data-state={checkState}
+            onClick={onCheckUpdate}
+            disabled={checkState === "checking"}
+          >
+            {CHECK_LABEL[checkState]}
+          </button>
+        )}
+      </div>
     </main>
   );
 }

@@ -1,6 +1,6 @@
 [package]
 name = "tokn"
-version = "0.2.0"
+version = "0.3.1"
 description = "Claude Code usage meter"
 authors = ["Sippakorn Suphapinyo"]
 license = "MIT"
@@ -28,3 +28,9 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 time = { version = "0.3", features = ["parsing"] }
 tokio = { version = "1", features = ["time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Subclasses the popover's NSWindow to a non-activating NSPanel so it can open
+# over other apps' full-screen Spaces without activating Tokn (a plain window
+# can't). v2.1 targets Tauri 2.8+ and ships the fullscreen reference example.
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
