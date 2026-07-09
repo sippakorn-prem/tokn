@@ -108,8 +108,12 @@ fn read_access_token() -> Result<TokenRead, String> {
     if !output.status.success() {
         return Ok(classify_keychain_failure(&output));
     }
-    let creds: StoredCreds = serde_json::from_slice(&output.stdout)
-        .map_err(|_| "unexpected credential format in Keychain".to_string())?;
+    let Ok(creds) = serde_json::from_slice::<StoredCreds>(&output.stdout) else {
+        // Unreadable or reshaped credential blob (e.g. Claude Code changed its
+        // format). Treat it as "not logged in" so the popover shows the connect
+        // gate rather than a hard error — running Claude Code rewrites it.
+        return Ok(TokenRead::Missing);
+    };
     if creds.claude_ai_oauth.expires_at <= now_ms() + EXPIRY_MARGIN_MS {
         return Ok(TokenRead::Expired);
     }
@@ -140,8 +144,14 @@ fn classify_keychain_failure(output: &std::process::Output) -> TokenRead {
 
 #[derive(Deserialize)]
 struct ApiWindow {
-    utilization: f64,
-    resets_at: String,
+    // The API sends `null` for these when a window is idle (e.g. no active
+    // 5-hour session), and has added sibling fields we don't read. Keep both
+    // optional so one empty window can't fail the whole response and blank
+    // every gauge.
+    #[serde(default)]
+    utilization: Option<f64>,
+    #[serde(default)]
+    resets_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -192,9 +202,17 @@ async fn fetch_usage(token: &str) -> Result<ApiUsage, UsageFetchError> {
             "usage endpoint returned {status}"
         )));
     }
-    resp.json::<ApiUsage>()
+    let body = resp
+        .text()
         .await
-        .map_err(|e| UsageFetchError::Other(format!("unexpected usage response: {e}")))
+        .map_err(|e| UsageFetchError::Other(format!("could not read usage response: {e}")))?;
+    serde_json::from_str::<ApiUsage>(&body).map_err(|e| {
+        // Surface a short snippet of the actual body (usage %s and reset times —
+        // no credentials) so a changed/unexpected response shape is diagnosable
+        // instead of an opaque "error decoding response body".
+        let snippet: String = body.chars().take(200).collect();
+        UsageFetchError::Other(format!("unexpected usage response: {e} · body: {snippet}"))
+    })
 }
 
 fn parse_resets_at(iso: &str) -> u64 {
@@ -205,7 +223,10 @@ fn parse_resets_at(iso: &str) -> u64 {
 
 fn to_window(label: &str, api: Option<ApiWindow>) -> UsageWindow {
     let (pct, resets) = api
-        .map(|w| (w.utilization, parse_resets_at(&w.resets_at)))
+        .map(|w| {
+            let resets = w.resets_at.as_deref().map(parse_resets_at).unwrap_or(0);
+            (w.utilization.unwrap_or(0.0), resets)
+        })
         .unwrap_or((0.0, 0));
     UsageWindow {
         label: label.into(),
@@ -904,4 +925,51 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Locks the usage-response contract: the API sends `null` for idle windows
+    /// and keeps adding sibling fields (`*_in_dollars`, …), so parsing must
+    /// tolerate both without failing the whole response. Regression guard for
+    /// the "error decoding response body" bug that blanked every gauge.
+    #[test]
+    fn usage_tolerates_null_fields_and_unknown_keys() {
+        let body = r#"{
+            "five_hour":  { "utilization": null, "resets_at": null, "cost_in_dollars": null },
+            "seven_day":  { "utilization": 74.0, "resets_at": "2026-07-13T09:00:00.473221+00:00", "limit_in_dollars": null },
+            "brand_new_top_level_field": 123
+        }"#;
+
+        let usage: ApiUsage =
+            serde_json::from_str(body).expect("null fields and unknown keys must not fail parsing");
+
+        let session = to_window("current session", usage.five_hour);
+        assert_eq!(session.used_pct, 0.0);
+        assert_eq!(session.resets_at_ms, 0, "null resets_at -> 0 (idle) sentinel");
+
+        let weekly = to_window("weekly limit", usage.seven_day);
+        assert_eq!(weekly.used_pct, 74.0);
+        assert!(weekly.resets_at_ms > 0, "fractional-second RFC3339 must parse");
+    }
+
+    /// Missing windows (and a bare `{}`) must degrade to zeroed, non-panicking
+    /// gauges rather than erroring.
+    #[test]
+    fn usage_tolerates_missing_windows() {
+        let usage: ApiUsage = serde_json::from_str("{}").expect("empty object is valid");
+        assert!(usage.five_hour.is_none());
+        assert!(usage.seven_day.is_none());
+        let session = to_window("current session", usage.five_hour);
+        assert_eq!(session.used_pct, 0.0);
+        assert_eq!(session.resets_at_ms, 0);
+    }
+
+    /// The exact reset-time shape observed from the live API.
+    #[test]
+    fn resets_at_parses_fractional_rfc3339() {
+        assert!(parse_resets_at("2026-07-13T09:00:00.473221+00:00") > 0);
+    }
 }
