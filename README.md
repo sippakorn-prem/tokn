@@ -1,5 +1,10 @@
 # Tokn
 
+[![Latest release](https://img.shields.io/github/v/release/sippakorn-prem/tokn?sort=semver)](https://github.com/sippakorn-prem/tokn/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/sippakorn-prem/tokn/total)](https://github.com/sippakorn-prem/tokn/releases)
+![Platform: macOS](https://img.shields.io/badge/platform-macOS%2010.15%2B-lightgrey)
+[![License: MIT](https://img.shields.io/github/license/sippakorn-prem/tokn)](LICENSE)
+
 Tokn is a free, open-source macOS menu bar app for watching Claude Code usage.
 
 It shows your current Claude usage at a glance, including:
@@ -11,6 +16,28 @@ It shows your current Claude usage at a glance, including:
 - a tray icon that reflects the highest active usage window
 
 Tokn is built with Tauri, Rust, React, and TypeScript.
+
+## Install
+
+**[⬇︎ Download the latest release](https://github.com/sippakorn-prem/tokn/releases/latest)**, then:
+
+1. Open the downloaded `Tokn_<version>_universal.dmg`.
+2. Drag **Tokn** into your **Applications** folder.
+3. Launch Tokn. It runs in the **menu bar** — there is no Dock icon or app-switcher entry.
+   - **Left-click** the tray icon → the usage popover
+   - **Right-click** (or Control-click) the tray icon → **Quit Tokn** (or press `⌘Q` while the popover is open)
+
+Tokn is signed with an Apple Developer ID and notarized by Apple, so it opens without Gatekeeper warnings. It's a universal build (Apple Silicon + Intel) and requires **macOS 10.15 or later**.
+
+You'll need to be signed in to the **Claude Code CLI** first — Tokn reads that existing login from the macOS Keychain (see [How It Works](#how-it-works)).
+
+### Updates
+
+Tokn checks for new releases on launch and installs them in the background — you don't need to re-download to update.
+
+### Zoom
+
+Press `⌘+` / `⌘−` to resize the popover, `⌘0` to reset, or use the zoom control in the footer.
 
 ## Important
 
