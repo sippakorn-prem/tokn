@@ -68,6 +68,20 @@ jobs:
           args: --target universal-apple-darwin
           tagName: ${{ github.ref_name }}
           releaseName: "Tokn ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install Tokn."
+          releaseBody: |
+            ## Install
+
+            1. Download the **`.dmg`** below and open it.
+            2. Drag **Tokn** into your **Applications** folder.
+            3. Launch it — Tokn lives in the **menu bar** (left-click for usage, right-click to Quit).
+
+            Signed with an Apple Developer ID and notarized by Apple, so it opens
+            without Gatekeeper warnings. Universal build (Apple Silicon + Intel),
+            requires macOS 10.15+.
+
+            You must be signed in to the Claude Code CLI — Tokn reads that login
+            from the macOS Keychain. See the [README](https://github.com/sippakorn-prem/tokn#readme) for details.
+
+            Already running Tokn? It auto-updates to this version on next launch.
           releaseDraft: false
           prerelease: false
