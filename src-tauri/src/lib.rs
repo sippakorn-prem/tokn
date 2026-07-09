@@ -9,9 +9,7 @@ use tauri::{
     LogicalPosition, LogicalSize, Manager, PhysicalPosition,
 };
 #[cfg(target_os = "macos")]
-use tauri_nspanel::{
-    tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
-};
+use tauri_nspanel::ManagerExt;
 use tauri_plugin_positioner::{Position, WindowExt};
 
 const TRAY_ID: &str = "tokn-tray";
@@ -586,59 +584,66 @@ fn popover_target(
     None
 }
 
-// Defines `PopoverPanel` (the non-activating panel type the popover window is
-// reclassed to) and `PopoverPanelDelegate` (its NSWindowDelegate, used to
-// auto-dismiss on click-away).
+/// Non-activating `NSPanel` support for the popover. A plain `NSWindow` can't
+/// open over another app's full-screen Space: `show`/`set_focus` activates
+/// Tokn, and macOS resolves that by switching you to the desktop Space (what
+/// you saw). A non-activating panel shows and takes clicks without activating
+/// the app, so it overlays full-screen apps — the standard macOS menu-bar
+/// trick. `CanJoinAllSpaces | FullScreenAuxiliary` lets it join whichever Space
+/// (regular or full-screen) is frontmost.
+///
+/// Lives in its own module for the inner `#![allow(clippy::unused_unit)]`: the
+/// `panel_event!` grammar requires an explicit `-> ()` return, which the macro
+/// emits as a unit-returning fn — and an `#[allow]` on the invocation alone
+/// doesn't reach into the expansion.
 #[cfg(target_os = "macos")]
-// The panel_event! grammar requires an explicit `-> ()` return, which the
-// macro then emits as a unit-returning fn — allow the lint it trips.
-#[allow(clippy::unused_unit)]
-tauri_panel! {
-    panel!(PopoverPanel {
-        config: {
-            // Non-activating, but still allowed to become key so it receives
-            // clicks and fires resign-key when focus moves away.
-            can_become_key_window: true,
-            is_floating_panel: true
-        }
-    })
+mod popover_panel {
+    #![allow(clippy::unused_unit)]
 
-    panel_event!(PopoverPanelDelegate {
-        window_did_resign_key(notification: &NSNotification) -> ()
-    })
-}
-
-/// Reclass the popover window to a non-activating `NSPanel`. A plain `NSWindow`
-/// can't open over another app's full-screen Space: `show`/`set_focus`
-/// activates Tokn, and macOS resolves that by switching you to the desktop
-/// Space (what you saw). A non-activating panel shows and takes clicks without
-/// activating the app, so it overlays full-screen apps — the standard macOS
-/// menu-bar-popover trick. `CanJoinAllSpaces | FullScreenAuxiliary` lets it
-/// join whichever Space (regular or full-screen) is frontmost.
-#[cfg(target_os = "macos")]
-fn install_popover_panel(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
-    let Ok(panel) = window.to_panel::<PopoverPanel>() else {
-        return;
+    use tauri_nspanel::{
+        tauri_panel, CollectionBehavior, PanelLevel, StyleMask, WebviewWindowExt,
     };
-    panel.set_level(PanelLevel::Floating.value());
-    panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
-    panel.set_collection_behavior(
-        CollectionBehavior::new()
-            .can_join_all_spaces()
-            .full_screen_auxiliary()
-            .into(),
-    );
-    // Keep the transparent, rounded look — the panel would otherwise paint an
-    // opaque system background behind the CSS popover.
-    panel.set_transparent(true);
 
-    // Click-away dismissal: a non-activating panel resigns key instead of
-    // firing Tauri's `Focused(false)`, so drive the hide from the delegate.
-    // `set_event_handler` retains the delegate, so the local can drop.
-    let delegate = PopoverPanelDelegate::new();
-    let handle = app.clone();
-    delegate.window_did_resign_key(move |_| dismiss_popover(&handle));
-    panel.set_event_handler(Some(delegate.as_ref()));
+    tauri_panel! {
+        panel!(PopoverPanel {
+            config: {
+                // Non-activating, but still allowed to become key so it
+                // receives clicks and fires resign-key when focus moves away.
+                can_become_key_window: true,
+                is_floating_panel: true
+            }
+        })
+
+        panel_event!(PopoverPanelDelegate {
+            window_did_resign_key(notification: &NSNotification) -> ()
+        })
+    }
+
+    /// Reclass the popover window and wire its click-away dismissal.
+    pub(crate) fn install(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+        let Ok(panel) = window.to_panel::<PopoverPanel>() else {
+            return;
+        };
+        panel.set_level(PanelLevel::Floating.value());
+        panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+        panel.set_collection_behavior(
+            CollectionBehavior::new()
+                .can_join_all_spaces()
+                .full_screen_auxiliary()
+                .into(),
+        );
+        // Keep the transparent, rounded look — the panel would otherwise paint
+        // an opaque system background behind the CSS popover.
+        panel.set_transparent(true);
+
+        // Click-away dismissal: a non-activating panel resigns key instead of
+        // firing Tauri's `Focused(false)`, so drive the hide from the delegate.
+        // `set_event_handler` retains the delegate, so the local can drop.
+        let delegate = PopoverPanelDelegate::new();
+        let handle = app.clone();
+        delegate.window_did_resign_key(move |_| super::dismiss_popover(&handle));
+        panel.set_event_handler(Some(delegate.as_ref()));
+    }
 }
 
 /// Hide the popover and record where/when — a tray click that stole key (and so
@@ -860,7 +865,7 @@ pub fn run() {
             // full-screen apps' Spaces without activating Tokn.
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
-                install_popover_panel(app.handle(), &window);
+                popover_panel::install(app.handle(), &window);
             }
 
             app.manage(UsageHistory(Mutex::new(load_history(app.handle()))));
