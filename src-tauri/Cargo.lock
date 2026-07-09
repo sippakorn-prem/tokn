@@ -2847,7 +2847,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4246,6 +4246,7 @@ dependencies = [
  "tauri-plugin-positioner",
  "tauri-plugin-updater",
  "time",
+ "tokio",
 ]
 
 [[package]]
