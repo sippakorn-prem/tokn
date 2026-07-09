@@ -631,6 +631,32 @@ fn spawn_update_check(app: &tauri::AppHandle) {
     });
 }
 
+/// Let the popover appear while a full-screen app owns the active Space.
+///
+/// Tauri's `visibleOnAllWorkspaces` only sets `canJoinAllSpaces`. Without
+/// `fullScreenAuxiliary` the window never shows over a full-screen Space, so a
+/// tray click there looks like it does nothing. We OR the missing flags onto
+/// whatever Tauri already configured.
+#[cfg(target_os = "macos")]
+fn allow_over_fullscreen(window: &tauri::WebviewWindow) {
+    use objc::{msg_send, sel, sel_impl};
+
+    // NSWindowCollectionBehavior bits.
+    const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
+    const STATIONARY: usize = 1 << 4;
+    const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    let ns_window = ns_window as *mut objc::runtime::Object;
+    unsafe {
+        let current: usize = msg_send![ns_window, collectionBehavior];
+        let behavior = current | CAN_JOIN_ALL_SPACES | STATIONARY | FULL_SCREEN_AUXILIARY;
+        let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -679,6 +705,12 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Show the popover even over full-screen Spaces.
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                allow_over_fullscreen(&window);
+            }
 
             // Best-effort: pull a newer signed build in the background.
             spawn_update_check(app.handle());
