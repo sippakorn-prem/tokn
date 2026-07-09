@@ -8,11 +8,11 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     LogicalPosition, LogicalSize, Manager, PhysicalPosition,
 };
-use tauri_plugin_positioner::{Position, WindowExt};
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{
     tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
 };
+use tauri_plugin_positioner::{Position, WindowExt};
 
 const TRAY_ID: &str = "tokn-tray";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
@@ -947,12 +947,12 @@ mod tests {
             serde_json::from_str(body).expect("null fields and unknown keys must not fail parsing");
 
         let session = to_window("current session", usage.five_hour);
-        assert_eq!(session.used_pct, 0.0);
-        assert_eq!(session.resets_at_ms, 0, "null resets_at -> 0 (idle) sentinel");
+        assert!(session.used_pct.abs() < 1e-9);
+        assert_eq!(session.resets_at_ms, 0); // null resets_at -> 0 (idle) sentinel
 
         let weekly = to_window("weekly limit", usage.seven_day);
-        assert_eq!(weekly.used_pct, 74.0);
-        assert!(weekly.resets_at_ms > 0, "fractional-second RFC3339 must parse");
+        assert!((weekly.used_pct - 74.0).abs() < 1e-9);
+        assert!(weekly.resets_at_ms > 0); // fractional-second RFC3339 must parse
     }
 
     /// Missing windows (and a bare `{}`) must degrade to zeroed, non-panicking
@@ -963,7 +963,7 @@ mod tests {
         assert!(usage.five_hour.is_none());
         assert!(usage.seven_day.is_none());
         let session = to_window("current session", usage.five_hour);
-        assert_eq!(session.used_pct, 0.0);
+        assert!(session.used_pct.abs() < 1e-9);
         assert_eq!(session.resets_at_ms, 0);
     }
 
