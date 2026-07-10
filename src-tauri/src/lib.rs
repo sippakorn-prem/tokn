@@ -23,6 +23,10 @@ const HISTORY_CAP: usize = 360;
 const HISTORY_WINDOW_MS: u64 = 6 * 60 * 60 * 1000;
 /// Minimum spacing between network fetches; calls inside it return the cache.
 const MIN_FETCH_SPACING_MS: u64 = 30_000;
+/// Absolute hard floor between real API calls — a backstop that holds even on
+/// paths that reset the normal spacing (auth-gate retries, an expired token
+/// returning 401). Guarantees the endpoint can't be hit more than once per 10s.
+const MIN_API_CALL_SPACING_MS: u64 = 10_000;
 /// 429 backoff when the server sends no Retry-After: 2m → 4m → … capped 15m.
 const BACKOFF_BASE_SECS: u64 = 120;
 const BACKOFF_CAP_SECS: u64 = 900;
@@ -377,6 +381,10 @@ struct GateState {
     /// until the fetch returns, so without this two overlapping calls would
     /// both hit the endpoint).
     in_flight: bool,
+    /// When the last real fetch was *started*. Backs the absolute
+    /// `MIN_API_CALL_SPACING_MS` floor, which caps the API call rate even on
+    /// paths that bypass `next_fetch_at_ms` (e.g. the auth-gate's `= 0`).
+    last_fetch_at_ms: u64,
 }
 
 impl GateState {
@@ -434,10 +442,16 @@ async fn usage_snapshot(
         // the rate-limit-cleared refetch) would each hit the endpoint.
         let within_spacing =
             now < g.next_fetch_at_ms && (g.last_snapshot.is_some() || g.rate_limited);
-        if within_spacing || g.in_flight {
+        // Absolute floor: never start a real fetch within MIN_API_CALL_SPACING_MS
+        // of the last one, whatever the higher-level spacing says. Backstop
+        // against spamming the API (rapid gate retries, an expired token, or a
+        // future logic slip).
+        let too_soon = now < g.last_fetch_at_ms.saturating_add(MIN_API_CALL_SPACING_MS);
+        if within_spacing || too_soon || g.in_flight {
             return Ok(g.cached_response());
         }
         g.in_flight = true;
+        g.last_fetch_at_ms = now;
     }
 
     let result = build_snapshot(&history).await;
@@ -447,8 +461,9 @@ async fn usage_snapshot(
         Ok(snapshot) => {
             g.rate_limited = false;
             g.backoff_secs = 0;
-            // Auth-gated states skip the spacing so the gate's retry
-            // button reacts immediately once the user fixes login.
+            // Auth-gated states skip the normal spacing so the gate's retry
+            // reacts fast once login is fixed — the MIN_API_CALL_SPACING_MS
+            // floor still caps it so rapid retries can't spam the API.
             g.next_fetch_at_ms = if matches!(snapshot.auth_status, AuthStatus::Connected) {
                 now + MIN_FETCH_SPACING_MS
             } else {
