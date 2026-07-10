@@ -26,6 +26,10 @@ const MIN_FETCH_SPACING_MS: u64 = 30_000;
 /// 429 backoff when the server sends no Retry-After: 2m → 4m → … capped 15m.
 const BACKOFF_BASE_SECS: u64 = 120;
 const BACKOFF_CAP_SECS: u64 = 900;
+/// Never retry a rate-limited endpoint faster than this, even if the server's
+/// Retry-After is tiny or zero — otherwise the retry-on-clear loop hammers the
+/// API and deepens the rate limiting.
+const MIN_RATELIMIT_RETRY_SECS: u64 = 60;
 /// How often the running app re-checks GitHub Releases for a newer build.
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -401,6 +405,20 @@ fn sync_tray(app: &tauri::AppHandle, snapshot: &UsageSnapshot) {
     }
 }
 
+/// How long to wait before the next fetch after a 429. Honors the server's
+/// `Retry-After` (or grows our own exponential backoff when it's absent), but
+/// never returns less than `MIN_RATELIMIT_RETRY_SECS`: a zero/tiny Retry-After
+/// would otherwise send the frontend's retry-on-clear straight into another
+/// 429, hammering the endpoint.
+fn ratelimit_wait_secs(retry_after: Option<u64>, backoff_secs: u64) -> u64 {
+    let requested = retry_after.unwrap_or(if backoff_secs == 0 {
+        BACKOFF_BASE_SECS
+    } else {
+        (backoff_secs * 2).min(BACKOFF_CAP_SECS)
+    });
+    requested.max(MIN_RATELIMIT_RETRY_SECS)
+}
+
 #[tauri::command]
 async fn usage_snapshot(
     app: tauri::AppHandle,
@@ -445,11 +463,7 @@ async fn usage_snapshot(
             Ok(snapshot)
         }
         Err(SnapshotError::RateLimited(retry_after)) => {
-            let wait_secs = retry_after.unwrap_or(if g.backoff_secs == 0 {
-                BACKOFF_BASE_SECS
-            } else {
-                (g.backoff_secs * 2).min(BACKOFF_CAP_SECS)
-            });
+            let wait_secs = ratelimit_wait_secs(retry_after, g.backoff_secs);
             g.backoff_secs = wait_secs;
             g.rate_limited = true;
             g.next_fetch_at_ms = now + wait_secs * 1000;
@@ -978,5 +992,16 @@ mod tests {
     #[test]
     fn resets_at_parses_fractional_rfc3339() {
         assert!(parse_resets_at("2026-07-13T09:00:00.473221+00:00") > 0);
+    }
+
+    /// A 429 must never schedule a retry faster than the floor — the guard
+    /// against the spam loop a zero/tiny Retry-After would otherwise cause.
+    #[test]
+    fn ratelimit_retry_never_below_floor() {
+        assert_eq!(ratelimit_wait_secs(Some(0), 0), MIN_RATELIMIT_RETRY_SECS);
+        assert_eq!(ratelimit_wait_secs(Some(1), 0), MIN_RATELIMIT_RETRY_SECS);
+        assert_eq!(ratelimit_wait_secs(Some(300), 0), 300); // honors a larger server value
+        assert!(ratelimit_wait_secs(None, 0) >= MIN_RATELIMIT_RETRY_SECS);
+        assert!(ratelimit_wait_secs(None, 480) <= BACKOFF_CAP_SECS); // doubling stays capped
     }
 }
