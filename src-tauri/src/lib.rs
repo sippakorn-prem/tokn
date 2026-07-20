@@ -19,6 +19,9 @@ const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const EXPIRY_MARGIN_MS: u64 = 60_000;
 /// ~6h of samples at the 60s refresh interval.
 const HISTORY_CAP: usize = 360;
+/// Burn-rate sample files in the app data dir, one per provider.
+const HISTORY_FILE: &str = "history.json";
+const CODEX_HISTORY_FILE: &str = "codex-history.json";
 /// Drop persisted samples older than the sparkline window on load.
 const HISTORY_WINDOW_MS: u64 = 6 * 60 * 60 * 1000;
 /// Minimum spacing between network fetches; calls inside it return the cache.
@@ -44,6 +47,9 @@ enum AuthStatus {
     MissingToken,
     ExpiredToken,
     KeychainDenied,
+    /// Codex provider: no `~/.codex` usage data found (Codex CLI never run, or
+    /// no turn has reported a rate-limit window yet).
+    CodexNotFound,
 }
 
 #[derive(Serialize, Clone)]
@@ -72,6 +78,10 @@ struct UsageSnapshot {
 
 /// (timestamp ms, five-hour utilization %) samples for the burn-rate sparkline.
 struct UsageHistory(Mutex<VecDeque<(u64, f64)>>);
+
+/// The Codex provider's own burn-rate history, managed separately so the two
+/// providers' sparklines don't blend (see [`UsageHistory`]).
+struct CodexHistory(UsageHistory);
 
 enum TokenRead {
     Ready(String),
@@ -245,15 +255,12 @@ fn to_window(label: &str, api: Option<ApiWindow>) -> UsageWindow {
 
 /// Burn-rate history survives restarts so the sparkline doesn't reset to
 /// "collecting data" on every launch.
-fn history_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    app.path()
-        .app_data_dir()
-        .ok()
-        .map(|d| d.join("history.json"))
+fn history_path(app: &tauri::AppHandle, file: &str) -> Option<std::path::PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join(file))
 }
 
-fn load_history(app: &tauri::AppHandle) -> VecDeque<(u64, f64)> {
-    let Some(path) = history_path(app) else {
+fn load_history(app: &tauri::AppHandle, file: &str) -> VecDeque<(u64, f64)> {
+    let Some(path) = history_path(app, file) else {
         return VecDeque::new();
     };
     let Ok(bytes) = std::fs::read(&path) else {
@@ -270,8 +277,8 @@ fn load_history(app: &tauri::AppHandle) -> VecDeque<(u64, f64)> {
     samples
 }
 
-fn save_history(app: &tauri::AppHandle, history: &UsageHistory) {
-    let Some(path) = history_path(app) else {
+fn save_history(app: &tauri::AppHandle, history: &UsageHistory, file: &str) {
+    let Some(path) = history_path(app, file) else {
         return;
     };
     let json = {
@@ -473,7 +480,7 @@ async fn usage_snapshot(
             drop(g);
             sync_tray(&app, &snapshot);
             if matches!(snapshot.auth_status, AuthStatus::Connected) {
-                save_history(&app, &history);
+                save_history(&app, &history, HISTORY_FILE);
             }
             Ok(snapshot)
         }
@@ -486,6 +493,228 @@ async fn usage_snapshot(
         }
         Err(SnapshotError::Other(error)) => Err(error),
     }
+}
+
+/* ── codex provider ───────────────────────────────────────────── */
+
+/// Reads Codex CLI usage from its local rollout logs. Unlike Claude, Codex
+/// needs no API call or credential: every turn appends a `token_count` event
+/// to `~/.codex/sessions/<Y>/<M>/<D>/rollout-*.jsonl`, carrying a `rate_limits`
+/// block with `used_percent` / `window_minutes` / `resets_at` per window — the
+/// same shape Tokn already renders. We read the newest turn's windows.
+mod codex {
+    use super::UsageWindow;
+    use serde::Deserialize;
+    use std::path::{Path, PathBuf};
+
+    #[derive(Deserialize)]
+    struct Line {
+        #[serde(rename = "type")]
+        kind: String,
+        payload: Option<Payload>,
+    }
+
+    #[derive(Deserialize)]
+    struct Payload {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        rate_limits: Option<RateLimits>,
+    }
+
+    #[derive(Deserialize)]
+    struct RateLimits {
+        #[serde(default)]
+        primary: Option<Window>,
+        #[serde(default)]
+        secondary: Option<Window>,
+    }
+
+    // Optional throughout for the same reason as Claude's `ApiWindow`: idle
+    // windows and future sibling fields must not fail the whole parse.
+    #[derive(Deserialize, Clone)]
+    struct Window {
+        #[serde(default)]
+        used_percent: Option<f64>,
+        #[serde(default)]
+        window_minutes: Option<u64>,
+        #[serde(default)]
+        resets_at: Option<i64>,
+    }
+
+    /// The newest turn's windows mapped onto Tokn's session/weekly gauges.
+    pub(crate) struct Windows {
+        pub session: UsageWindow,
+        pub weekly: UsageWindow,
+    }
+
+    fn sessions_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex").join("sessions"))
+    }
+
+    fn dir_entries(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .collect()
+    }
+
+    /// All `rollout-*.jsonl` paths under `sessions/<Y>/<M>/<D>`, newest mtime first.
+    fn rollouts_newest_first() -> Vec<PathBuf> {
+        let Some(root) = sessions_dir() else {
+            return Vec::new();
+        };
+        let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+        for year in dir_entries(&root) {
+            for month in dir_entries(&year) {
+                for day in dir_entries(&month) {
+                    for path in dir_entries(&day) {
+                        let is_rollout = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"));
+                        if !is_rollout {
+                            continue;
+                        }
+                        let mtime = path
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::UNIX_EPOCH);
+                        files.push((mtime, path));
+                    }
+                }
+            }
+        }
+        files.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+        files.into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// The last `token_count` event's rate limits in a rollout file, if any.
+    /// Active rollouts reach several MB and are mostly `response_item` lines, so
+    /// scan from the end and only JSON-parse lines that could be the one we want
+    /// (cheap substring test first) — the newest `token_count` wins.
+    fn last_rate_limits(path: &Path) -> Option<RateLimits> {
+        let text = std::fs::read_to_string(path).ok()?;
+        for line in text.lines().rev() {
+            if !line.contains("\"token_count\"") {
+                continue;
+            }
+            let Ok(l) = serde_json::from_str::<Line>(line) else {
+                continue;
+            };
+            if l.kind != "event_msg" {
+                continue;
+            }
+            let Some(payload) = l.payload else { continue };
+            if payload.kind != "token_count" {
+                continue;
+            }
+            if let Some(rl) = payload.rate_limits {
+                return Some(rl);
+            }
+        }
+        None
+    }
+
+    fn to_window(label: &str, w: Option<&Window>) -> UsageWindow {
+        let (pct, resets) = w
+            .map(|w| {
+                // Codex sends `resets_at` as unix *seconds* (Claude uses an
+                // RFC3339 string), so convert directly rather than via parse.
+                let resets = w
+                    .resets_at
+                    .filter(|&s| s > 0)
+                    .map(|s| s as u64 * 1000)
+                    .unwrap_or(0);
+                (w.used_percent.unwrap_or(0.0), resets)
+            })
+            .unwrap_or((0.0, 0));
+        UsageWindow {
+            label: label.into(),
+            used_pct: pct,
+            resets_at_ms: resets,
+        }
+    }
+
+    /// Shortest window → session gauge, longest → weekly. Codex reports a 5h
+    /// window (`window_minutes` 300) and/or a weekly one (10080); with a single
+    /// window present, place it on the matching gauge and idle the other.
+    fn map_windows(rl: &RateLimits) -> Windows {
+        let mut wins: Vec<Window> = [rl.primary.clone(), rl.secondary.clone()]
+            .into_iter()
+            .flatten()
+            .collect();
+        wins.sort_by_key(|w| w.window_minutes.unwrap_or(u64::MAX));
+        let (session, weekly) = match wins.as_slice() {
+            [] => (None, None),
+            [only] => {
+                if only.window_minutes.unwrap_or(0) <= 600 {
+                    (Some(only), None)
+                } else {
+                    (None, Some(only))
+                }
+            }
+            [short, long, ..] => (Some(short), Some(long)),
+        };
+        Windows {
+            session: to_window("current session", session),
+            weekly: to_window("weekly limit", weekly),
+        }
+    }
+
+    /// Freshest Codex usage, or `None` when Codex has never run / no turn has
+    /// reported rate-limit windows yet. Scans a few recent rollouts so a
+    /// brand-new session without a `token_count` line yet doesn't blank it.
+    pub(crate) fn read_windows() -> Option<Windows> {
+        let rl = rollouts_newest_first()
+            .iter()
+            .take(8)
+            .find_map(|p| last_rate_limits(p))?;
+        Some(map_windows(&rl))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn map_windows_for_test(json_line: &str) -> Windows {
+        let line: Line = serde_json::from_str(json_line).expect("valid token_count line");
+        map_windows(&line.payload.unwrap().rate_limits.unwrap())
+    }
+}
+
+/// Codex counterpart to `usage_snapshot`: builds the snapshot from local
+/// rollout logs (no network, no fetch gate) and syncs the tray to it, so the
+/// tray follows whichever provider the popover is currently polling.
+#[tauri::command]
+async fn codex_snapshot(
+    app: tauri::AppHandle,
+    history: tauri::State<'_, CodexHistory>,
+) -> Result<UsageSnapshot, String> {
+    let now = now_ms();
+    // The newest rollout can be several MB; read/parse it off the UI thread.
+    let windows = tauri::async_runtime::spawn_blocking(codex::read_windows)
+        .await
+        .map_err(|e| format!("codex read task failed: {e}"))?;
+    let snapshot = match windows {
+        Some(w) => {
+            let burn_rate = record_burn_sample(&history.0, w.session.used_pct, now);
+            UsageSnapshot {
+                auth_status: AuthStatus::Connected,
+                session: w.session,
+                weekly: w.weekly,
+                burn_rate,
+                fetched_at_ms: now,
+                rate_limited_until_ms: None,
+                placeholder: false,
+            }
+        }
+        None => disconnected_snapshot(AuthStatus::CodexNotFound),
+    };
+    sync_tray(&app, &snapshot);
+    if matches!(snapshot.auth_status, AuthStatus::Connected) {
+        save_history(&app, &history.0, CODEX_HISTORY_FILE);
+    }
+    Ok(snapshot)
 }
 
 /* ── tray icon ────────────────────────────────────────────────── */
@@ -879,6 +1108,7 @@ pub fn run() {
         .manage(PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             usage_snapshot,
+            codex_snapshot,
             quit,
             restart,
             pending_update,
@@ -896,7 +1126,14 @@ pub fn run() {
                 popover_panel::install(app.handle(), &window);
             }
 
-            app.manage(UsageHistory(Mutex::new(load_history(app.handle()))));
+            app.manage(UsageHistory(Mutex::new(load_history(
+                app.handle(),
+                HISTORY_FILE,
+            ))));
+            app.manage(CodexHistory(UsageHistory(Mutex::new(load_history(
+                app.handle(),
+                CODEX_HISTORY_FILE,
+            )))));
 
             // Right-click menu — the app's only quit path (accessory apps have
             // no Dock icon or menu bar). Left-click still toggles the popover.
@@ -1018,5 +1255,53 @@ mod tests {
         assert_eq!(ratelimit_wait_secs(Some(300), 0), 300); // honors a larger server value
         assert!(ratelimit_wait_secs(None, 0) >= MIN_RATELIMIT_RETRY_SECS);
         assert!(ratelimit_wait_secs(None, 480) <= BACKOFF_CAP_SECS); // doubling stays capped
+    }
+
+    /// A real Codex `token_count` event: the 5h window (`window_minutes` 300)
+    /// maps to the session gauge, the weekly (10080) to the weekly gauge, and
+    /// the unix-seconds `resets_at` becomes epoch ms.
+    #[test]
+    fn codex_maps_primary_and_secondary_windows() {
+        let line = r#"{
+            "timestamp": "2026-07-20T08:06:39.990Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": { "model_context_window": 258400 },
+                "rate_limits": {
+                    "primary":   { "used_percent": 42.0, "window_minutes": 300,   "resets_at": 1785000000 },
+                    "secondary": { "used_percent": 7.5,  "window_minutes": 10080, "resets_at": 1785062347 },
+                    "brand_new_field": true
+                }
+            }
+        }"#;
+
+        let w = codex::map_windows_for_test(line);
+        assert!((w.session.used_pct - 42.0).abs() < 1e-9);
+        assert_eq!(w.session.resets_at_ms, 1785000000_000); // seconds -> ms
+        assert!((w.weekly.used_pct - 7.5).abs() < 1e-9);
+        assert_eq!(w.weekly.resets_at_ms, 1785062347_000);
+    }
+
+    /// Codex often reports only the weekly window (primary 10080, no secondary):
+    /// it must land on the weekly gauge and leave the session gauge idle.
+    #[test]
+    fn codex_single_weekly_window_idles_session() {
+        let line = r#"{
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "primary":   { "used_percent": 5.0, "window_minutes": 10080, "resets_at": 1785062347 },
+                    "secondary": null
+                }
+            }
+        }"#;
+
+        let w = codex::map_windows_for_test(line);
+        assert!(w.session.used_pct.abs() < 1e-9);
+        assert_eq!(w.session.resets_at_ms, 0);
+        assert!((w.weekly.used_pct - 5.0).abs() < 1e-9);
+        assert_eq!(w.weekly.resets_at_ms, 1785062347_000);
     }
 }

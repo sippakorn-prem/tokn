@@ -64,6 +64,12 @@ const COPY: Record<GateAuthStatus, { title: string; body: string; action: string
     action: "Try again",
     note: "permission is handled by macOS",
   },
+  codexNotFound: {
+    title: "No Codex CLI activity yet",
+    body: "Run the codex CLI at least once so it records usage, then retry.",
+    action: "Retry",
+    note: "Tokn reads Codex's local ~/.codex logs",
+  },
 };
 
 /** First-run gate: frosted scrim over the blurred meters, one crisp CTA. */

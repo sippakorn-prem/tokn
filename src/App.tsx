@@ -4,8 +4,9 @@ import { listen } from "@tauri-apps/api/event";
 import { Gate } from "./Gate";
 import { Gauge } from "./Gauge";
 import { Mark } from "./Mark";
+import { ProviderToggle } from "./ProviderToggle";
 import { Spark } from "./Spark";
-import { fetchUsage, fmtAgo, fmtCountdown, UsageSnapshot } from "./usage";
+import { fetchUsage, fmtAgo, fmtCountdown, Provider, UsageSnapshot } from "./usage";
 import { useZoom } from "./zoom";
 import tauriConf from "../src-tauri/tauri.conf.json";
 import "./App.css";
@@ -27,6 +28,11 @@ const REFRESH_INTERVAL_MS = 60_000;
 const MIN_SPIN_MS = 720;
 /** Manual-refresh cooldown; matches the backend's minimum fetch spacing. */
 const REFRESH_COOLDOWN_MS = 30_000;
+
+const PROVIDER_KEY = "tokn.provider";
+function loadProvider(): Provider {
+  return localStorage.getItem(PROVIDER_KEY) === "codex" ? "codex" : "claude";
+}
 
 /** Compact countdown that fits inside the 30px refresh button. */
 function fmtShort(ms: number): string {
@@ -71,20 +77,35 @@ function RefreshIcon() {
 function App() {
   const theme = useTheme();
   const zoom = useZoom();
+  const [provider, setProvider] = useState<Provider>(loadProvider);
   const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [spinning, setSpinning] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [cooldownUntil, setCooldownUntil] = useState(0);
   const spinUntil = useRef(0);
+  const loadId = useRef(0);
 
   const loadUsage = useCallback(() => {
-    return fetchUsage()
+    // Guard against out-of-order resolves: a slow fetch for the previously
+    // selected provider must not overwrite the newer one's snapshot.
+    const id = ++loadId.current;
+    return fetchUsage(provider)
       .then((s) => {
+        if (id !== loadId.current) return;
         setSnapshot(s);
         setError(null);
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => {
+        if (id === loadId.current) setError(String(e));
+      });
+  }, [provider]);
+
+  const onProviderChange = useCallback((p: Provider) => {
+    localStorage.setItem(PROVIDER_KEY, p);
+    setProvider(p);
+    setSnapshot(null); // drop the other provider's gauges while the new load lands
+    setError(null);
   }, []);
 
   const refresh = useCallback(() => {
@@ -176,7 +197,7 @@ function App() {
       <header className="tk-head">
         <Mark />
         <span className="tk-word">Tokn</span>
-        <span className="tk-tagline">claude code usage</span>
+        <ProviderToggle value={provider} onChange={onProviderChange} />
       </header>
 
       {updateVersion && (
