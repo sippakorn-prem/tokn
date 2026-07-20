@@ -6,7 +6,14 @@ export interface UsageWindow {
   resetsAtMs: number;
 }
 
-export type AuthStatus = "connected" | "missingToken" | "expiredToken" | "keychainDenied";
+export type Provider = "claude" | "codex";
+
+export type AuthStatus =
+  | "connected"
+  | "missingToken"
+  | "expiredToken"
+  | "keychainDenied"
+  | "codexNotFound";
 
 export interface UsageSnapshot {
   authStatus: AuthStatus;
@@ -24,8 +31,8 @@ export interface UsageSnapshot {
   placeholder?: boolean;
 }
 
-export function fetchUsage(): Promise<UsageSnapshot> {
-  return invoke<UsageSnapshot>("usage_snapshot");
+export function fetchUsage(provider: Provider = "claude"): Promise<UsageSnapshot> {
+  return invoke<UsageSnapshot>(provider === "codex" ? "codex_snapshot" : "usage_snapshot");
 }
 
 export type Band = "ok" | "warn" | "crit";
