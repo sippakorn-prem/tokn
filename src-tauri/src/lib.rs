@@ -30,12 +30,12 @@ const MIN_FETCH_SPACING_MS: u64 = 30_000;
 /// paths that reset the normal spacing (auth-gate retries, an expired token
 /// returning 401). Guarantees the endpoint can't be hit more than once per 10s.
 const MIN_API_CALL_SPACING_MS: u64 = 10_000;
-/// 429 backoff when the server sends no Retry-After: 2m → 4m → … capped 15m.
-const BACKOFF_BASE_SECS: u64 = 120;
+/// Ceiling for the escalating 429 backoff (60s → 2m → 4m → 8m → 15m).
 const BACKOFF_CAP_SECS: u64 = 900;
-/// Never retry a rate-limited endpoint faster than this, even if the server's
-/// Retry-After is tiny or zero — otherwise the retry-on-clear loop hammers the
-/// API and deepens the rate limiting.
+/// The first 429 wait, and the floor below which the server's `Retry-After` is
+/// ignored. The usage endpoint sends `Retry-After: 0` (an edge rate limit with
+/// no real window); honoring that would retry every 60s forever and keep
+/// re-tripping the limit, so anything under this floor falls back to backoff.
 const MIN_RATELIMIT_RETRY_SECS: u64 = 60;
 /// How often the running app re-checks GitHub Releases for a newer build.
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -420,18 +420,27 @@ fn sync_tray(app: &tauri::AppHandle, snapshot: &UsageSnapshot) {
     }
 }
 
-/// How long to wait before the next fetch after a 429. Honors the server's
-/// `Retry-After` (or grows our own exponential backoff when it's absent), but
-/// never returns less than `MIN_RATELIMIT_RETRY_SECS`: a zero/tiny Retry-After
-/// would otherwise send the frontend's retry-on-clear straight into another
-/// 429, hammering the endpoint.
+/// How long to wait before the next fetch after a 429.
+///
+/// The usage endpoint's 429 is an edge (Cloudflare) rate limit: it sends
+/// `Retry-After: 0` with no reset window, so its own hint is useless. Taken at
+/// face value it pins every retry at the 60s floor, and because the limit is
+/// volume-over-a-window that steady drip keeps re-tripping it — it never
+/// clears. So we only trust a `Retry-After` that is actually usable (>= the
+/// floor); anything missing or smaller falls through to escalating backoff
+/// (60s → 2m → 4m → 8m, capped at 15m) that spaces retries out enough for the
+/// window to drain. `backoff_secs` is the previous wait, or 0 on the first 429.
 fn ratelimit_wait_secs(retry_after: Option<u64>, backoff_secs: u64) -> u64 {
-    let requested = retry_after.unwrap_or(if backoff_secs == 0 {
-        BACKOFF_BASE_SECS
+    // A real server window (>= floor) is authoritative — match it exactly.
+    if let Some(secs) = retry_after.filter(|&s| s >= MIN_RATELIMIT_RETRY_SECS) {
+        return secs;
+    }
+    // No usable hint: first 429 waits the floor, each consecutive one doubles.
+    if backoff_secs == 0 {
+        MIN_RATELIMIT_RETRY_SECS
     } else {
         (backoff_secs * 2).min(BACKOFF_CAP_SECS)
-    });
-    requested.max(MIN_RATELIMIT_RETRY_SECS)
+    }
 }
 
 #[tauri::command]
@@ -1255,6 +1264,19 @@ mod tests {
         assert_eq!(ratelimit_wait_secs(Some(300), 0), 300); // honors a larger server value
         assert!(ratelimit_wait_secs(None, 0) >= MIN_RATELIMIT_RETRY_SECS);
         assert!(ratelimit_wait_secs(None, 480) <= BACKOFF_CAP_SECS); // doubling stays capped
+    }
+
+    /// The usage endpoint's real 429 (`Retry-After: 0`) must escalate on each
+    /// consecutive failure instead of pinning at 60s forever — otherwise the
+    /// steady drip keeps re-tripping the edge limit and it never clears.
+    #[test]
+    fn ratelimit_zero_retry_after_escalates() {
+        // Anthropic always sends Some(0); the wait must grow across retries.
+        assert_eq!(ratelimit_wait_secs(Some(0), 0), 60); // first 429
+        assert_eq!(ratelimit_wait_secs(Some(0), 60), 120); // then double
+        assert_eq!(ratelimit_wait_secs(Some(0), 120), 240);
+        assert_eq!(ratelimit_wait_secs(Some(0), 480), BACKOFF_CAP_SECS);
+        assert_eq!(ratelimit_wait_secs(Some(0), 900), BACKOFF_CAP_SECS); // stays capped
     }
 
     /// A real Codex `token_count` event: the 5h window (`window_minutes` 300)
