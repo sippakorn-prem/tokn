@@ -1300,9 +1300,9 @@ mod tests {
 
         let w = codex::map_windows_for_test(line);
         assert!((w.session.used_pct - 42.0).abs() < 1e-9);
-        assert_eq!(w.session.resets_at_ms, 1785000000_000); // seconds -> ms
+        assert_eq!(w.session.resets_at_ms, 1_785_000_000_000); // seconds -> ms
         assert!((w.weekly.used_pct - 7.5).abs() < 1e-9);
-        assert_eq!(w.weekly.resets_at_ms, 1785062347_000);
+        assert_eq!(w.weekly.resets_at_ms, 1_785_062_347_000);
     }
 
     /// Codex often reports only the weekly window (primary 10080, no secondary):
@@ -1324,6 +1324,6 @@ mod tests {
         assert!(w.session.used_pct.abs() < 1e-9);
         assert_eq!(w.session.resets_at_ms, 0);
         assert!((w.weekly.used_pct - 5.0).abs() < 1e-9);
-        assert_eq!(w.weekly.resets_at_ms, 1785062347_000);
+        assert_eq!(w.weekly.resets_at_ms, 1_785_062_347_000);
     }
 }
